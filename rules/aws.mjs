@@ -1,0 +1,270 @@
+import { makeViolation } from "./engine.mjs";
+
+// Seed AWS rule pack — 7 rules, not the 8 originally planned. The 8th (flag S3 buckets with no
+// aws_s3_bucket_server_side_encryption_configuration) was dropped after checking the real
+// provider docs at implementation time: AWS applies default SSE-S3 encryption to every new
+// bucket automatically since 2023, with or without this resource declared (confirmed via
+// terraform-provider-aws's own docs: "Destroying an
+// aws_s3_bucket_server_side_encryption_configuration resource resets the bucket to Amazon S3
+// bucket default encryption" — implying a default already exists). Flagging its absence would
+// have been a false positive on every ordinary bucket, not a real finding.
+
+const SENSITIVE_PORTS = [22, 3389, 3306, 5432, 1433, 6379, 27017, 9200];
+
+function portRangeCoversSensitive(fromPort, toPort) {
+  if (fromPort == null || toPort == null) return true; // unbounded/unresolved — treat conservatively as open
+  if (fromPort <= 0 && toPort >= 65535) return true;
+  return SENSITIVE_PORTS.some((p) => p >= fromPort && p <= toPort);
+}
+
+function isOpenIpv4(cidrs) {
+  return Array.isArray(cidrs) && cidrs.includes("0.0.0.0/0");
+}
+function isOpenIpv6(cidrs) {
+  return Array.isArray(cidrs) && cidrs.includes("::/0");
+}
+
+// policy/json attributes hold a JSON *string* — pure functions of already-known config resolve
+// at plan time and land in `after`; anything depending on a not-yet-applied value lands in
+// after_unknown instead, where there's no string to parse at all.
+function extractPolicyJson(resource) {
+  const after = resource.change.after || {};
+  const raw = after.policy ?? after.json;
+  if (typeof raw !== "string") return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function policyHasWildcard(doc) {
+  const rawStatements = doc?.Statement;
+  const statements = Array.isArray(rawStatements) ? rawStatements : rawStatements ? [rawStatements] : [];
+  return statements.some((stmt) => {
+    const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+    if (actions.includes("*")) return true;
+    const principal = stmt.Principal;
+    if (principal === "*") return true;
+    if (principal && typeof principal === "object") {
+      for (const v of Object.values(principal)) {
+        const vals = Array.isArray(v) ? v : [v];
+        if (vals.includes("*")) return true;
+      }
+    }
+    return false;
+  });
+}
+
+const rules = [
+  {
+    id: "aws.storage.s3-public-access-block-missing",
+    category: "storage.public-access",
+    severity: "critical",
+    provider: "aws",
+    kind: "aggregate",
+    resourceTypes: ["aws_s3_bucket"],
+    description:
+      "Every S3 bucket must have a companion aws_s3_bucket_public_access_block with all four " +
+      "block/ignore/restrict attributes true — blocking public access is not an attribute on " +
+      "aws_s3_bucket itself.",
+    check(index) {
+      const buckets = index.byType("aws_s3_bucket");
+      const pabs = index.byType("aws_s3_bucket_public_access_block");
+      const required = ["block_public_acls", "block_public_policy", "ignore_public_acls", "restrict_public_buckets"];
+
+      return buckets
+        .filter((bucket) => {
+          // Matched by module_address, not by resolved bucket id/reference: a newly-created
+          // bucket's `id` is unresolved at plan time (after_unknown.id === true), so the PAB's
+          // `bucket = aws_s3_bucket.this.id` reference is unresolved too — there's no literal
+          // value to match on for the common "brand new bucket" case. Same-module is a
+          // deliberate, documented simplification: it can miss a PAB declared in a different
+          // module than its bucket (a rare pattern), but it will never wrongly flag a
+          // correctly-configured same-module setup, which is the safer failure direction for a
+          // blocking tool.
+          const pab = pabs.find((p) => p.module_address === bucket.module_address);
+          if (!pab) return true;
+          const after = pab.change.after || {};
+          return required.some((attr) => after[attr] !== true);
+        })
+        .map((bucket) =>
+          makeViolation(rules[0], bucket, {
+            message: "no aws_s3_bucket_public_access_block resource protects this bucket (or one exists with an attribute not set to true)",
+            remediation:
+              "add an aws_s3_bucket_public_access_block in the same module with block_public_acls, " +
+              "block_public_policy, ignore_public_acls, and restrict_public_buckets all set to true",
+          })
+        );
+    },
+  },
+  {
+    id: "aws.network.sg-open-ingress-sensitive-port",
+    category: "network.open-ingress",
+    severity: "critical",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_security_group", "aws_vpc_security_group_ingress_rule"],
+    description:
+      "Flags ingress rules open to 0.0.0.0/0 or ::/0 on a sensitive port (SSH/RDP/common " +
+      "database ports) or with no port restriction at all. Covers both the classic inline " +
+      "aws_security_group ingress block and the newer per-rule aws_vpc_security_group_ingress_rule " +
+      "resource (AWS provider v5+) — a plan using only one shape would be invisible to a rule " +
+      "checking only the other.",
+    check(resource) {
+      const after = resource.change.after || {};
+      const violations = [];
+
+      if (resource.type === "aws_security_group") {
+        (after.ingress || []).forEach((block, i) => {
+          const openV4 = isOpenIpv4(block.cidr_blocks);
+          const openV6 = isOpenIpv6(block.ipv6_cidr_blocks);
+          if ((openV4 || openV6) && portRangeCoversSensitive(block.from_port, block.to_port)) {
+            violations.push(
+              makeViolation(rules[1], resource, {
+                message: `ingress[${i}] allows ${openV4 ? "0.0.0.0/0" : "::/0"} on port ${block.from_port}-${block.to_port}`,
+                remediation: "restrict cidr_blocks/ipv6_cidr_blocks to a known range, or remove the rule if unneeded",
+                attribute: `ingress[${i}]`,
+                actualValue: openV4 ? block.cidr_blocks : block.ipv6_cidr_blocks,
+              })
+            );
+          }
+        });
+      } else if (resource.type === "aws_vpc_security_group_ingress_rule") {
+        const openV4 = after.cidr_ipv4 === "0.0.0.0/0";
+        const openV6 = after.cidr_ipv6 === "::/0";
+        if ((openV4 || openV6) && portRangeCoversSensitive(after.from_port, after.to_port)) {
+          violations.push(
+            makeViolation(rules[1], resource, {
+              message: `allows ${openV4 ? after.cidr_ipv4 : after.cidr_ipv6} on port ${after.from_port}-${after.to_port}`,
+              remediation: "restrict cidr_ipv4/cidr_ipv6 to a known range, or remove the rule if unneeded",
+              attribute: openV4 ? "cidr_ipv4" : "cidr_ipv6",
+              actualValue: openV4 ? after.cidr_ipv4 : after.cidr_ipv6,
+            })
+          );
+        }
+      }
+      return violations;
+    },
+  },
+  {
+    id: "aws.iam.wildcard-action-or-principal",
+    category: "iam.wildcard",
+    severity: "critical",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_iam_policy", "aws_iam_role_policy", "aws_iam_policy_document"],
+    description:
+      'Flags IAM policy documents containing Action: "*" or Principal: "*" (or a "*" inside a ' +
+      "Principal map's values).",
+    check(resource) {
+      const doc = extractPolicyJson(resource);
+      // Deliberate deviation from the original plan wording ("surface as a lower-confidence
+      // warning"): a policy string that's genuinely unresolved at plan time (after_unknown) is
+      // extremely common for legitimate dynamic policies (e.g. jsonencode(local.foo) depending
+      // on a not-yet-applied resource), and a hard-block tool that flags "can't verify" as a
+      // finding would be a constant false-positive source on ordinary code — worse than the gap
+      // it closes. Skip silently instead; this only weakens coverage for policies that are both
+      // dynamic AND insecure, not for the common case.
+      if (!doc || !policyHasWildcard(doc)) return [];
+      return [
+        makeViolation(rules[2], resource, {
+          message: 'policy document contains a wildcard Action ("*") or Principal ("*")',
+          remediation: "scope Action/Principal to the specific actions/principals actually needed",
+        }),
+      ];
+    },
+  },
+  {
+    id: "aws.database.rds-publicly-accessible",
+    category: "database.public-access",
+    severity: "critical",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_db_instance", "aws_rds_cluster_instance"],
+    description: 'Flags publicly_accessible = true. Verified default is false (safe) — absence is NOT flagged.',
+    check(resource) {
+      const after = resource.change.after || {};
+      if (after.publicly_accessible !== true) return [];
+      return [
+        makeViolation(rules[3], resource, {
+          message: "publicly_accessible is explicitly set to true",
+          remediation: "set publicly_accessible = false (the default) unless a public endpoint is genuinely required",
+          attribute: "publicly_accessible",
+          actualValue: true,
+        }),
+      ];
+    },
+  },
+  {
+    id: "aws.database.rds-unencrypted",
+    category: "database.unencrypted",
+    severity: "critical",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_db_instance"],
+    description: "Flags storage_encrypted !== true. Verified default is false (unsafe) — absence IS flagged.",
+    check(resource) {
+      const after = resource.change.after || {};
+      if (after.storage_encrypted === true) return [];
+      return [
+        makeViolation(rules[4], resource, {
+          message: `storage_encrypted is ${after.storage_encrypted === false ? "explicitly false" : "not set (defaults to false)"}`,
+          remediation: "set storage_encrypted = true",
+          attribute: "storage_encrypted",
+          actualValue: after.storage_encrypted ?? null,
+        }),
+      ];
+    },
+  },
+  {
+    id: "aws.secrets.kms-rotation-disabled",
+    category: "secrets.key-rotation",
+    severity: "medium",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_kms_key"],
+    description: "Flags enable_key_rotation !== true. Verified default is false — absence IS flagged.",
+    check(resource) {
+      const after = resource.change.after || {};
+      if (after.enable_key_rotation === true) return [];
+      return [
+        makeViolation(rules[5], resource, {
+          message: `enable_key_rotation is ${after.enable_key_rotation === false ? "explicitly false" : "not set (defaults to false)"}`,
+          remediation: "set enable_key_rotation = true",
+          attribute: "enable_key_rotation",
+          actualValue: after.enable_key_rotation ?? null,
+        }),
+      ];
+    },
+  },
+  {
+    id: "aws.compute.imdsv1-allowed",
+    category: "compute.imds-hardening",
+    severity: "high",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_instance"],
+    description:
+      'Flags metadata_options.http_tokens explicitly set to "optional". Unlike its sibling ' +
+      "attributes, the provider docs state no Terraform-level default for http_tokens — the " +
+      "effective default depends on AWS account-level instance-metadata-defaults settings not " +
+      "visible in a plan, so omission is NOT flagged, only an explicit unsafe value.",
+    check(resource) {
+      const after = resource.change.after || {};
+      const metadataOptions = Array.isArray(after.metadata_options) ? after.metadata_options[0] : after.metadata_options;
+      const httpTokens = metadataOptions?.http_tokens;
+      if (httpTokens !== "optional") return [];
+      return [
+        makeViolation(rules[6], resource, {
+          message: 'metadata_options.http_tokens is explicitly set to "optional", allowing IMDSv1',
+          remediation: 'set metadata_options { http_tokens = "required" } to require IMDSv2',
+          attribute: "metadata_options.http_tokens",
+          actualValue: "optional",
+        }),
+      ];
+    },
+  },
+];
+
+export default rules;
