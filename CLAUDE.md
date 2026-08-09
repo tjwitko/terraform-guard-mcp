@@ -171,6 +171,22 @@ before any real API call happens.
   always reference their own bucket's ARN, that is the common case. The scan is deliberately a
   handful of unambiguous literal patterns, not an HCL parser; resist growing it into a second rule
   system. It also runs without credentials, so it's the only signal available on the failed-plan path.
+- **`.terraform` existing is not the same as `.terraform` being current.** `needsInit` only checks
+  for the directory, so a module or provider added after the first init stayed uninstalled and
+  every later validate/plan failed with an init-required error. That is not a hypothetical: in a
+  real agent run the model read "Module not installed" as a defect in its own configuration and
+  rewrote the file twice more chasing a problem this server had manufactured, deleting working
+  resources on the way. `terraform_plan` now detects Terraform's own init-required signals via
+  `looksLikeInitRequired`, re-initializes, and retries once. When a tool's error message is wrong,
+  the caller does not get to find that out — it just acts on it.
+- **`lib/resource-census.mjs` watches the trajectory, not the snapshot.** It records which
+  resources a directory declared at each scan and reports anything that disappeared. The failure
+  it exists for: a model fixing a validation error rewrote `main.tf` three times and silently
+  dropped the S3 bucket and Object Lock configuration — the entire point of the project. Every
+  individual response looked like a reasonable fix; only the sequence showed the regression, and
+  nothing was watching the sequence. Advisory, never blocking — deleting resources is legitimate,
+  doing it silently while fixing something else is not. The warning is attached to every response
+  path including the failed-plan one, because that is where the thrashing actually happens.
 - **A wildcard in an ARN's ACCOUNT field is a cross-account hole that looks scoped.**
   `arn:aws:iam::*:role/log-service-role` grants access to anyone who creates that role name in
   their own account. The original rule only matched a bare `"*"` and missed it entirely. Note

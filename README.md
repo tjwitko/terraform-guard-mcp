@@ -78,6 +78,16 @@ the engine and is caught by the source scan instead.
 **A failed plan is never reported as clean.** If `terraform plan` can't authenticate, the response
 says outright that the plan-based rules did not run and the result is partial, not passing.
 
+**Stale `.terraform` directories are re-initialized automatically.** Adding a module or provider
+after the first `init` leaves it uninstalled, and the resulting error looks like a defect in your
+configuration rather than in the tooling. The server detects Terraform's own init-required signals
+and retries once.
+
+**Removed resources are reported.** Each scan records what a directory declared; if resources
+present last time have since vanished, the response says which ones. Advisory, not blocking —
+deleting resources is legitimate, but doing it silently while fixing something else is how an
+agent loop quietly deletes the thing the project exists for.
+
 Each rule's "absence is/isn't a violation" direction was individually verified against real
 `terraform-provider-aws` docs before being written, not assumed — see `CLAUDE.md`'s "Things to
 know" for the two cases (S3 encryption, IMDS hardening) where that verification changed the rule

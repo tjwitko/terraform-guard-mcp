@@ -14,6 +14,7 @@ import {
   needsInit,
   terraformInit,
   terraformValidate,
+  looksLikeInitRequired,
   terraformPlan,
   terraformShowJson,
   terraformApply,
@@ -22,6 +23,7 @@ import {
 } from "./lib/terraform-cli.mjs";
 import { assumeApplyRole, isScopedCredentialsConfigured } from "./lib/aws-credentials.mjs";
 import { scanTerraformSources } from "./lib/source-scan.mjs";
+import { findRemovedResources } from "./lib/resource-census.mjs";
 import { storePlan, lookupPlan, consumePlan } from "./lib/plan-store.mjs";
 import { formatRefusalMessage, worstSeverity } from "./lib/format.mjs";
 import { evaluate } from "./rules/engine.mjs";
@@ -115,7 +117,25 @@ server.tool(
     // `validate` runs before `plan` because it needs no cloud credentials. Schema errors — a
     // hallucinated resource type, a misspelled argument — are the most common generated-Terraform
     // defect, and without this they were only reachable in environments that could authenticate.
-    const validate = terraformValidate(resolvedDir);
+    // Any resource that vanished since the last scan of this directory. Advisory, not blocking —
+    // deleting resources is legitimate. It's deleting them *silently while fixing something else*
+    // that isn't, and that pattern is invisible in any single tool response.
+    const removed = findRemovedResources(resolvedDir);
+    const regressionWarning = removed.length
+      ? `\n\n[REGRESSION WARNING] These resources were present the last time this directory was ` +
+        `scanned and are now gone: ${removed.join(", ")}. If you removed them on purpose, ignore ` +
+        `this. If they disappeared while you were fixing something else, you have deleted working ` +
+        `infrastructure — restore it before continuing.`
+      : "";
+
+    let validate = terraformValidate(resolvedDir);
+    // A stale .terraform directory (a module or provider added after the first init) surfaces as
+    // a validation error that looks like the caller's fault. Re-initialize and retry once rather
+    // than reporting a problem this server created.
+    if (validate.status !== 0 && looksLikeInitRequired(validate.stdout || validate.stderr || "")) {
+      const reinit = terraformInit(resolvedDir);
+      if (reinit.status === 0) validate = terraformValidate(resolvedDir);
+    }
     if (validate.status !== 0) {
       return {
         content: [
@@ -124,7 +144,7 @@ server.tool(
             text:
               `Refusing to plan-approve: the configuration is not valid Terraform. No security ` +
               `scan was performed — fix these schema errors first.\n\n` +
-              `${(validate.stdout || validate.stderr || "").slice(0, 4000)}`,
+              `${(validate.stdout || validate.stderr || "").slice(0, 4000)}${regressionWarning}`,
           },
         ],
         isError: true,
@@ -157,7 +177,10 @@ server.tool(
       const findingsText = sourceFindings.length
         ? `\n\nThe source scan DID find ${sourceFindings.length} issue(s):\n${formatRefusalMessage(sourceFindings)}`
         : `\n\nThe source scan found no issues in the patterns it can check without a plan.`;
-      return { content: [{ type: "text", text: `${preamble}${findingsText}\n\n${output}` }], isError: true };
+      return {
+        content: [{ type: "text", text: `${preamble}${findingsText}\n\n${output}${regressionWarning}` }],
+        isError: true,
+      };
     }
 
     let planJson;
@@ -190,8 +213,9 @@ server.tool(
         workingDir: resolvedDir,
         violationCount: violations.length,
         worstSeverity: worstSeverity(violations),
-        message: formatRefusalMessage(violations),
+        message: formatRefusalMessage(violations) + regressionWarning,
         violations,
+        removedSinceLastScan: removed,
       };
       return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], isError: true };
     }
@@ -206,9 +230,11 @@ server.tool(
       expiresAt: meta.expiresAt,
       resourceSummary,
       resourcesScanned: resourceChanges.length,
+      removedSinceLastScan: removed,
       message:
         `Plan is clean: 0 violations across ${resourceChanges.length} resource change(s). ` +
-        `Call terraform_apply with planId "${meta.planId}" before ${meta.expiresAt} to apply exactly this plan.`,
+        `Call terraform_apply with planId "${meta.planId}" before ${meta.expiresAt} to apply exactly this plan.` +
+        regressionWarning,
     };
     return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }] };
   }
