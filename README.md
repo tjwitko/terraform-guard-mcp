@@ -92,11 +92,65 @@ rewrite.
 - **The rule engine never reads credentials** — only `resource_changes[].change.{after,
   after_unknown}` structural attributes (booleans, CIDRs, policy JSON).
 
-**The one limitation this can't engineer around**: it only governs actions taken *through*
-`terraform_plan`/`terraform_apply`. An agent with a raw shell available can always run
-`terraform apply` directly and bypass this server entirely. That's not a gap in this
-implementation — it's the honest edge of what any MCP server can enforce, stated here rather
-than left for someone to discover the hard way.
+## Credential scoping
+
+By default this server governs only actions taken *through* its two tools — an agent with a raw
+shell could run `terraform apply` directly and bypass it. Credential scoping closes that at the
+layer that can actually hold it: **AWS IAM**. Rather than trying to stop the agent from *running*
+`terraform apply`, it makes a raw invocation powerless.
+
+Set two environment variables and the server mints short-lived, apply-capable credentials via STS
+for each guarded apply:
+
+```sh
+export TFGUARD_APPLY_ROLE_ARN="arn:aws:iam::<account>:role/terraform-guard-apply"
+export TFGUARD_EXTERNAL_ID="<a shared secret matching the role's trust policy>"   # optional
+export TFGUARD_SESSION_DURATION=900                                              # optional, 900–43200
+```
+
+The intended setup is two identities:
+
+1. **Ambient identity** — whatever your shell and `~/.aws` already resolve. Give it read/plan
+   permissions plus `sts:AssumeRole` on the apply role, and nothing that can mutate
+   infrastructure. This is what `terraform plan` uses, and what a raw `terraform apply` would
+   get — hence `AccessDenied` from AWS itself.
+2. **Apply role** — the permissions an apply actually needs, with a trust policy trusting the
+   ambient principal (gated on `sts:ExternalId` if you set one).
+
+The server deliberately does not create these roles. Provisioning IAM would require the ambient
+identity to hold IAM write permissions, which is exactly what this design removes.
+
+Every apply reports which mode was in force — `[scopedCredentials: true|false]` — on both success
+and failure, so an unconfigured server says so plainly rather than looking identical to a
+configured one, and a permissions-shaped failure can be read against the identity that produced
+it. Successful scoped applies also report the CloudTrail `RoleSessionName`.
+
+**If STS fails, the apply is refused — never retried with ambient credentials.** A silent
+fallback would run the apply at a different privilege level than configured while still
+reporting success, which is the precise failure this mechanism exists to prevent.
+
+### What this does and doesn't buy you
+
+**Does**: a raw `terraform apply` — from any shell, wrapper, or tool, bypassing this server
+entirely — fails at AWS with `AccessDenied`. That property holds regardless of what the agent
+can execute locally, because it's enforced by IAM rather than by anything on your machine.
+
+**Doesn't**: the ambient identity is *permitted* to assume the apply role, so a determined agent
+could call `sts:AssumeRole` itself and obtain the same credentials. That path is not prevented —
+but it is **attributable**: legitimate applies carry `RoleSessionName = tfguard-<planId>` naming a
+plan this server actually scanned and stored, which an out-of-band assume-role cannot forge.
+Deliberate bypass becomes visible in CloudTrail rather than invisible.
+
+Closing that residual entirely requires either MFA on the apply role's trust policy (real
+prevention, at the cost of a TOTP prompt on every apply) or moving the privileged half into a
+daemon running as a separate OS user (real prevention, no prompt, considerably more machinery).
+Both were considered and deliberately deferred — on a single-user machine where the agent's shell
+runs as the same OS user as this server, anything the server can read the shell can read too, so
+there is no local secret that constitutes a boundary.
+
+A Claude Code permission deny-rule blocking `Bash(terraform apply*)` is a useful *additional*
+layer, but only that: it's a text matcher, and testing confirmed `bash -c "terraform apply"`
+defeats it. It stops the accidental bypass; credential scoping is what stops the effective one.
 
 ## Known gotchas
 
@@ -130,7 +184,7 @@ Register with an MCP client:
 ```
 
 Optional env vars: `TF_WORKING_ROOT` (containment root, default: server's startup cwd),
-`TF_PLAN_TTL_SECONDS` (default 900).
+`TF_PLAN_TTL_SECONDS` (default 900), and the `TFGUARD_*` credential-scoping vars documented above.
 
 ## Status
 
@@ -138,4 +192,12 @@ AWS rule pack (7 rules) implemented and verified end-to-end against real `terraf
 deliberately-insecure fixture blocks with the exact expected violation, a compliant fixture gets
 approved and genuinely applies against a local MinIO backend, and the single-use/replay,
 staleness, and TTL-expiry protections were each proven with a real Terraform run, not just
-asserted. GCP and Azure rule packs are the natural next addition, using the same engine.
+asserted.
+
+Credential scoping is implemented and its local-testable paths are verified: the unconfigured
+path applies and reports `scopedCredentials: false`; a configured path whose STS call fails
+refuses rather than falling back. The full configured path (assume role → apply succeeds → raw
+apply gets `AccessDenied`) needs a real AWS account to exercise — MinIO cannot serve STS — and
+has not been run here.
+
+GCP and Azure rule packs are the natural next addition, using the same engine.

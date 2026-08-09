@@ -32,6 +32,7 @@ don't go through its own tool.
   under `~/Library/Application Support/terraform-guard-mcp/plans/`, TTL, single-use consumption.
   This is what makes "block insecure applies" a real guarantee instead of an advisory check —
   read this file before touching anything else if you're auditing the security model.
+- `lib/aws-credentials.mjs` — STS AssumeRole for credential scoping (see "Things to know")
 - `rules/engine.mjs` — `buildIndex()`/`evaluate()`, provider routing by `provider_name`'s final
   path segment (not `type` prefix — deliberate, see "Things to know")
 - `rules/aws.mjs` — the only provider pack implemented so far, 7 rules
@@ -123,6 +124,36 @@ before any real API call happens.
   shows up. This server passes cloud credentials through to `terraform` by design; sanitization
   here is about not leaking *unrelated* secrets from the parent process, not about denying
   `terraform` what it needs.
+- **`TFGUARD_` is its own sanitization prefix, and it has to be.** `/^TF_/` does NOT match
+  `TFGUARD_` — that regex requires the underscore immediately after `TF`. Before this was
+  explicitly added to `PREFIX_ALLOWLIST`, every `TFGUARD_*` var would have been silently deleted
+  at startup and credential scoping would have looked broken for completely non-obvious reasons.
+  If you add more config vars, keep them on this prefix and don't assume `TF_` covers it.
+- **`buildApplyEnv()` deletes `AWS_PROFILE`/`AWS_DEFAULT_PROFILE`, deliberately.** A profile set
+  in the ambient environment wins over static credentials in the AWS credential chain, so leaving
+  it would silently run the apply under the ambient (plan-only) identity while this server
+  reported it had scoped the credentials. There's a unit test pinning this; don't "simplify" it
+  back into an inline object spread.
+- **Terraform re-resolves env-sourced credentials at apply time, and does not object to them
+  differing from plan time.** Verified four ways before the feature was built, since the whole
+  injection design depends on it: the plan JSON's `provider_config` contains no credential
+  fields when they come from the environment; `strings` over the binary plan file finds no
+  credential material (which also matters because the plan store persists these files to disk);
+  applying a stored plan with deliberately-invalid credentials fails with `InvalidAccessKeyId`
+  (proving re-resolution rather than pinning); and applying with *different valid* credentials
+  succeeds. If you ever move credentials into the provider block literally, all of that stops
+  holding — keep them env-sourced.
+- **An STS failure refuses the apply and never falls back to ambient credentials.** A fallback
+  would run at a different privilege level than configured while reporting success. The plan is
+  consumed on that path too, so a failed assume-role can't be retried against the same planId.
+- **`scopedCredentials` is reported on failures as well as successes.** This was originally
+  success-only and testing caught it — a permissions-shaped apply failure is exactly when
+  "which identity ran this?" is the first question worth asking.
+- **The AWS SDK dependency is a deliberate divergence from the siblings**, which carry only
+  `@modelcontextprotocol/sdk` + `zod`. `@aws-sdk/client-sts` (24 packages) is used instead of
+  shelling out to the `aws` CLI because the CLI is a second prerequisite that may not be
+  installed, and the SDK resolves the ambient credential chain (env → `~/.aws` → SSO → IMDS) the
+  same way Terraform does — security-critical logic not worth reimplementing.
 - **GCP/Azure are not implemented.** The engine and taxonomy are provider-agnostic by design —
   adding `rules/gcp.mjs`/`rules/azure.mjs` and a line in `rules/index.mjs` is the entire
   integration surface, no engine changes needed — but no attribute defaults for either cloud have

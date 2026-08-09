@@ -16,8 +16,10 @@ import {
   terraformPlan,
   terraformShowJson,
   terraformApply,
+  buildApplyEnv,
   safeUnlink,
 } from "./lib/terraform-cli.mjs";
+import { assumeApplyRole, isScopedCredentialsConfigured } from "./lib/aws-credentials.mjs";
 import { storePlan, lookupPlan, consumePlan } from "./lib/plan-store.mjs";
 import { formatRefusalMessage, worstSeverity } from "./lib/format.mjs";
 import { evaluate } from "./rules/engine.mjs";
@@ -31,8 +33,13 @@ import { PROVIDER_PACKS } from "./rules/index.mjs";
 // server passes cloud credentials through to `terraform` by design — sanitization here is about
 // not leaking *unrelated* secrets from the parent process, not about denying terraform what it
 // needs to function.
+// TFGUARD_ needs its own entry: /^TF_/ does NOT match "TFGUARD_" (it requires the underscore
+// directly after TF), so this server's own config vars would be silently deleted at startup and
+// credential scoping would appear broken for entirely non-obvious reasons. Kept as a distinct
+// prefix rather than renaming to TF_GUARD_* so this server's config never sits inside
+// Terraform's own TF_ namespace.
 const EXACT_ALLOWLIST = ["PATH", "HOME"];
-const PREFIX_ALLOWLIST = [/^AWS_/, /^ARM_/, /^AZURE_/, /^GOOGLE_/, /^GCLOUD_/, /^TF_/];
+const PREFIX_ALLOWLIST = [/^AWS_/, /^ARM_/, /^AZURE_/, /^GOOGLE_/, /^GCLOUD_/, /^TF_/, /^TFGUARD_/];
 
 function sanitizeEnv() {
   for (const key in process.env) {
@@ -217,17 +224,66 @@ server.tool(
       };
     }
 
-    const apply = terraformApply(resolvedDir, found.planFilePath);
+    // Mint short-lived apply-capable credentials, so that the ambient environment (what a raw
+    // shell inherits) can stay plan/read-only. See lib/aws-credentials.mjs.
+    let applyEnv;
+    let scopedCredentials = false;
+    let roleSessionName = null;
+    if (isScopedCredentialsConfigured()) {
+      try {
+        const credentials = await assumeApplyRole({ planId: plan_id });
+        applyEnv = buildApplyEnv(process.env, credentials);
+        scopedCredentials = true;
+        roleSessionName = credentials.roleSessionName;
+      } catch (error) {
+        // Deliberately never falls back to ambient credentials. A silent fallback would run the
+        // apply at a different privilege level than configured while still reporting success —
+        // the exact failure this whole mechanism exists to prevent.
+        consumePlan(plan_id);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Refusing to apply: could not assume the configured apply role ` +
+                `(TFGUARD_APPLY_ROLE_ARN=${process.env.TFGUARD_APPLY_ROLE_ARN}). ${error.message}\n\n` +
+                `Not falling back to ambient credentials — those are meant to be plan-only, and ` +
+                `applying with them would run at a different privilege level than configured. ` +
+                `Fix the role/trust policy and run terraform_plan again (this planId is now consumed).`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    const apply = terraformApply(resolvedDir, found.planFilePath, applyEnv);
     consumePlan(plan_id); // single-use regardless of outcome — no replay even if apply itself fails
+
+    // scopedCredentials is reported on every apply — including failures — so the caller can never
+    // assume a guarantee that isn't actually in force, and so a permissions-shaped failure can be
+    // read against the credential mode that produced it. Reporting it only on success would hide
+    // it in exactly the case where "which identity ran this?" is the first question worth asking.
+    const note = scopedCredentials
+      ? `\n\n[scopedCredentials: true — applied with short-lived credentials from the configured ` +
+        `apply role, CloudTrail RoleSessionName "${roleSessionName}"]`
+      : `\n\n[scopedCredentials: false — TFGUARD_APPLY_ROLE_ARN is not set, so this applied with ` +
+        `ambient credentials. A raw \`terraform apply\` outside this server would have the same ` +
+        `power. See README "Credential scoping" to close that gap.]`;
 
     if (apply.status !== 0) {
       return {
-        content: [{ type: "text", text: `terraform apply failed:\n${(apply.stderr || apply.stdout || "").slice(0, 4000)}` }],
+        content: [
+          {
+            type: "text",
+            text: `terraform apply failed:\n${(apply.stderr || apply.stdout || "").slice(0, 4000)}${note}`,
+          },
+        ],
         isError: true,
       };
     }
 
-    return { content: [{ type: "text", text: apply.stdout || "Apply completed." }] };
+    return { content: [{ type: "text", text: (apply.stdout || "Apply completed.") + note }] };
   }
 );
 
