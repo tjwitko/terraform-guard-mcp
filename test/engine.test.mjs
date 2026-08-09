@@ -168,6 +168,84 @@ test("iam-wildcard: unresolved policy (after_unknown) is skipped, not blocked", 
   assert.deepEqual(violations, []);
 });
 
+// The exact policy a local model shipped on an audit-log bucket. It reads like a scoped ARN, but
+// the wildcard is in the account field, so any AWS account with a role of that name gets access.
+test("iam-wildcard: flags a Principal ARN whose ACCOUNT field is a wildcard", () => {
+  const plan = planOf(
+    resource({
+      address: "aws_s3_bucket_policy.logs",
+      type: "aws_s3_bucket_policy",
+      after: {
+        policy: JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { AWS: "arn:aws:iam::*:role/log-service-role" },
+              Action: ["s3:PutObject"],
+              Resource: "arn:aws:s3:::logs/*",
+            },
+          ],
+        }),
+      },
+    })
+  );
+  const violations = evaluate(plan, PROVIDER_PACKS);
+  assert.deepEqual(ruleIds(violations), ["aws.iam.wildcard-action-or-principal"]);
+  assert.match(violations[0].message, /ACCOUNT field/);
+});
+
+// A wildcard scoped to a known account is an ordinary pattern, not a cross-account hole.
+test("iam-wildcard: does NOT flag a wildcard in the resource part of a known-account ARN", () => {
+  const plan = planOf(
+    resource({
+      address: "aws_s3_bucket_policy.logs",
+      type: "aws_s3_bucket_policy",
+      after: {
+        policy: JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            { Effect: "Allow", Principal: { AWS: "arn:aws:iam::123456789012:role/*" }, Action: ["s3:GetObject"] },
+          ],
+        }),
+      },
+    })
+  );
+  assert.deepEqual(evaluate(plan, PROVIDER_PACKS), []);
+});
+
+// A wildcard inside a Deny restricts access rather than granting it.
+test("iam-wildcard: does NOT flag a wildcard inside a Deny statement", () => {
+  const plan = planOf(
+    resource({
+      address: "aws_iam_policy.deny_all",
+      type: "aws_iam_policy",
+      after: {
+        policy: JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [{ Effect: "Deny", Action: "*", Resource: "*" }],
+        }),
+      },
+    })
+  );
+  assert.deepEqual(evaluate(plan, PROVIDER_PACKS), []);
+});
+
+test("iam-wildcard: covers resource-based policy types, not just IAM resources", () => {
+  for (const type of ["aws_sqs_queue_policy", "aws_sns_topic_policy", "aws_ecr_repository_policy"]) {
+    const plan = planOf(
+      resource({
+        address: `${type}.x`,
+        type,
+        after: {
+          policy: JSON.stringify({ Statement: [{ Effect: "Allow", Principal: "*", Action: ["x:Y"] }] }),
+        },
+      })
+    );
+    assert.deepEqual(ruleIds(evaluate(plan, PROVIDER_PACKS)), ["aws.iam.wildcard-action-or-principal"], type);
+  }
+});
+
 test("rds-publicly-accessible: flags explicit true", () => {
   const plan = planOf(resource({ address: "aws_db_instance.main", type: "aws_db_instance", after: { publicly_accessible: true, storage_encrypted: true } }));
   const violations = evaluate(plan, PROVIDER_PACKS);

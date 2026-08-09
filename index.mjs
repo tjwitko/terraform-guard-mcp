@@ -13,6 +13,7 @@ import {
   checkTerraformInstalled,
   needsInit,
   terraformInit,
+  terraformValidate,
   terraformPlan,
   terraformShowJson,
   terraformApply,
@@ -20,6 +21,7 @@ import {
   safeUnlink,
 } from "./lib/terraform-cli.mjs";
 import { assumeApplyRole, isScopedCredentialsConfigured } from "./lib/aws-credentials.mjs";
+import { scanTerraformSources } from "./lib/source-scan.mjs";
 import { storePlan, lookupPlan, consumePlan } from "./lib/plan-store.mjs";
 import { formatRefusalMessage, worstSeverity } from "./lib/format.mjs";
 import { evaluate } from "./rules/engine.mjs";
@@ -110,15 +112,52 @@ server.tool(
       }
     }
 
+    // `validate` runs before `plan` because it needs no cloud credentials. Schema errors — a
+    // hallucinated resource type, a misspelled argument — are the most common generated-Terraform
+    // defect, and without this they were only reachable in environments that could authenticate.
+    const validate = terraformValidate(resolvedDir);
+    if (validate.status !== 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Refusing to plan-approve: the configuration is not valid Terraform. No security ` +
+              `scan was performed — fix these schema errors first.\n\n` +
+              `${(validate.stdout || validate.stderr || "").slice(0, 4000)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
     const tmpPlanPath = path.join(os.tmpdir(), `tfguard-${randomUUID()}.tfplan`);
     const varFileArg = var_file ? path.join(resolvedDir, var_file) : undefined;
     const plan = terraformPlan(resolvedDir, tmpPlanPath, varFileArg);
     if (plan.status !== 0 || !existsSync(tmpPlanPath)) {
       safeUnlink(tmpPlanPath);
-      return {
-        content: [{ type: "text", text: `terraform plan failed:\n${(plan.stderr || plan.stdout || "").slice(0, 4000)}` }],
-        isError: true,
-      };
+      const output = (plan.stderr || plan.stdout || "").slice(0, 4000);
+      // A credentials failure is not a clean bill of health, and it used to read like one: the
+      // caller saw "plan failed", treated it as an environment problem, and moved on believing
+      // nothing had been flagged — when in fact no security rule had run at all. Say so outright.
+      const looksLikeCredentials =
+        /credential|InvalidClientTokenId|GetCallerIdentity|AuthFailure|ExpiredToken|no valid provider/i.test(output);
+      // The source scan needs no credentials, so it still produces real findings here. Without it
+      // this path returned zero security signal, which is how a wide-open bucket policy sailed
+      // through unnoticed in a real generated project.
+      const sourceFindings = scanTerraformSources(resolvedDir);
+      const preamble = looksLikeCredentials
+        ? `Refusing to plan-approve: terraform plan could not authenticate to the cloud provider, ` +
+          `so THE PLAN-BASED SECURITY RULES DID NOT RUN. Schema validation passed and the ` +
+          `credential-free source scan did run, but this is a PARTIAL result, not a clean one. For ` +
+          `a full scan, either supply working credentials, or add skip_credentials_validation, ` +
+          `skip_requesting_account_id and skip_metadata_api_check to the provider block with dummy ` +
+          `keys (there are no environment-variable equivalents for the first two).`
+        : `Refusing to plan-approve: terraform plan failed, so the plan-based security rules did not run.`;
+      const findingsText = sourceFindings.length
+        ? `\n\nThe source scan DID find ${sourceFindings.length} issue(s):\n${formatRefusalMessage(sourceFindings)}`
+        : `\n\nThe source scan found no issues in the patterns it can check without a plan.`;
+      return { content: [{ type: "text", text: `${preamble}${findingsText}\n\n${output}` }], isError: true };
     }
 
     let planJson;
@@ -136,7 +175,10 @@ server.tool(
       toDestroy: resourceChanges.filter((r) => r.change.actions.includes("delete")).length,
     };
 
-    const violations = evaluate(planJson, PROVIDER_PACKS);
+    // Source findings are merged with plan-based ones: they catch literals the plan JSON cannot
+    // represent at all (a Principal inside a jsonencode() that also references an unresolved ARN
+    // is absent from `after`, `after_unknown` and `configuration` alike — verified directly).
+    const violations = [...evaluate(planJson, PROVIDER_PACKS), ...scanTerraformSources(resolvedDir)];
 
     if (violations.length > 0) {
       // Never persisted for apply — the whole enforcement guarantee rests on there being no

@@ -154,6 +154,33 @@ before any real API call happens.
   shelling out to the `aws` CLI because the CLI is a second prerequisite that may not be
   installed, and the SDK resolves the ambient credential chain (env → `~/.aws` → SSO → IMDS) the
   same way Terraform does — security-critical logic not worth reimplementing.
+- **`terraform validate` runs before `plan`, and a plan failure is never reported as clean.**
+  `validate` needs no cloud credentials; `plan` does. Before this, a credential-less environment
+  got a bare "plan failed" that read like an environment nuisance — and a real generated project
+  sailed through with a wide-open bucket policy because every security rule had silently been
+  skipped. Credential failures are now detected specifically and the response says outright that
+  the plan-based rules did not run. Note there are **no environment-variable equivalents** for
+  `skip_credentials_validation` or `skip_requesting_account_id` (only `skip_metadata_api_check` has
+  one, `AWS_EC2_METADATA_DISABLED`), so injecting dummy credentials cannot force an offline plan —
+  verified directly; don't try to "fix" it that way.
+- **`lib/source-scan.mjs` exists because some dangerous literals are structurally absent from
+  plan JSON.** A policy built with `jsonencode({... Principal = {AWS = "arn:aws:iam::*:role/x"} ...})`
+  that also interpolates a not-yet-created ARN is unknown at plan time: verified directly that
+  `after.policy` is null, `after_unknown.policy` is true, and `configuration` records only the
+  expression's *references* — the literal text appears nowhere. Since bucket policies nearly
+  always reference their own bucket's ARN, that is the common case. The scan is deliberately a
+  handful of unambiguous literal patterns, not an HCL parser; resist growing it into a second rule
+  system. It also runs without credentials, so it's the only signal available on the failed-plan path.
+- **A wildcard in an ARN's ACCOUNT field is a cross-account hole that looks scoped.**
+  `arn:aws:iam::*:role/log-service-role` grants access to anyone who creates that role name in
+  their own account. The original rule only matched a bare `"*"` and missed it entirely. Note
+  `arn:aws:iam::aws:policy/...` has the literal string `aws` in that field and must not be
+  confused for a wildcard, and `arn:aws:iam::123456789012:role/*` is a normal same-account pattern
+  that is deliberately not flagged.
+- **The wildcard rule covers resource-based policies, not just IAM ones.** It originally listed
+  only `aws_iam_*` types, so a wide-open `aws_s3_bucket_policy` was invisible no matter how
+  permissive — and resource-based policies are precisely what grant *outside* principals access.
+  Wildcards inside `Deny` statements are ignored, since those restrict rather than grant.
 - **A static permission `deny` rule always beats a PreToolUse hook's `allow`.** Verified
   empirically while building this workspace's `.claude/hooks/terraform-local-guard.mjs`: with
   `Bash(terraform destroy*)` in the deny list, a hook returning `permissionDecision: "allow"` for

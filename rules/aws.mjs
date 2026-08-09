@@ -38,22 +38,45 @@ function extractPolicyJson(resource) {
   }
 }
 
-function policyHasWildcard(doc) {
+// An IAM ARN is arn:partition:service:region:ACCOUNT:resource. A wildcard in the account field
+// means "this principal in ANY AWS account on earth" — e.g. arn:aws:iam::*:role/log-service-role
+// grants access to anyone who creates a role with that name in their own account. It reads like a
+// scoped ARN, which is exactly why it slips through review; a real generated config in this
+// workspace shipped precisely that on an audit-log bucket.
+//
+// Deliberately NOT flagged: a wildcard in the resource portion of a known account, such as
+// arn:aws:iam::123456789012:role/* — that stays inside one account and is a normal pattern.
+function principalHasAccountWildcard(value) {
+  if (typeof value !== "string" || !value.startsWith("arn:")) return false;
+  const account = value.split(":")[4];
+  return account !== undefined && account.includes("*");
+}
+
+// Returns a description of what matched, so the violation names the actual offending value rather
+// than a generic "contains a wildcard".
+function findPolicyWildcard(doc) {
   const rawStatements = doc?.Statement;
   const statements = Array.isArray(rawStatements) ? rawStatements : rawStatements ? [rawStatements] : [];
-  return statements.some((stmt) => {
-    const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
-    if (actions.includes("*")) return true;
-    const principal = stmt.Principal;
-    if (principal === "*") return true;
+  for (const stmt of statements) {
+    if (stmt?.Effect === "Deny") continue; // a wildcard inside a Deny is restrictive, not permissive
+
+    const actions = Array.isArray(stmt?.Action) ? stmt.Action : stmt?.Action ? [stmt.Action] : [];
+    if (actions.includes("*")) return 'a wildcard Action ("*")';
+
+    const principal = stmt?.Principal;
+    if (principal === "*") return 'a wildcard Principal ("*")';
     if (principal && typeof principal === "object") {
-      for (const v of Object.values(principal)) {
-        const vals = Array.isArray(v) ? v : [v];
-        if (vals.includes("*")) return true;
+      for (const raw of Object.values(principal)) {
+        const values = Array.isArray(raw) ? raw : [raw];
+        if (values.includes("*")) return 'a wildcard Principal ("*")';
+        const accountWildcard = values.find(principalHasAccountWildcard);
+        if (accountWildcard) {
+          return `a Principal ARN with a wildcard in the ACCOUNT field ("${accountWildcard}") — this grants access to that role name in ANY AWS account, not just yours`;
+        }
       }
     }
-    return false;
-  });
+  }
+  return null;
 }
 
 const rules = [
@@ -153,10 +176,24 @@ const rules = [
     severity: "critical",
     provider: "aws",
     kind: "single",
-    resourceTypes: ["aws_iam_policy", "aws_iam_role_policy", "aws_iam_policy_document"],
+    // Resource-based policies belong here as much as identity-based ones — arguably more, since
+    // they are what grants OUTSIDE principals access. The list originally covered only IAM
+    // resources, so a wide-open aws_s3_bucket_policy was invisible to this rule no matter how
+    // permissive it was.
+    resourceTypes: [
+      "aws_iam_policy",
+      "aws_iam_role_policy",
+      "aws_iam_policy_document",
+      "aws_s3_bucket_policy",
+      "aws_sqs_queue_policy",
+      "aws_sns_topic_policy",
+      "aws_ecr_repository_policy",
+      "aws_secretsmanager_secret_policy",
+    ],
     description:
-      'Flags IAM policy documents containing Action: "*" or Principal: "*" (or a "*" inside a ' +
-      "Principal map's values).",
+      'Flags policy documents containing Action: "*", Principal: "*", or a Principal ARN whose ' +
+      "account field is a wildcard (which grants access to any AWS account). Covers identity-based " +
+      "and resource-based policies. Wildcards inside Deny statements are ignored — those restrict.",
     check(resource) {
       const doc = extractPolicyJson(resource);
       // Deliberate deviation from the original plan wording ("surface as a lower-confidence
@@ -166,11 +203,12 @@ const rules = [
       // finding would be a constant false-positive source on ordinary code — worse than the gap
       // it closes. Skip silently instead; this only weakens coverage for policies that are both
       // dynamic AND insecure, not for the common case.
-      if (!doc || !policyHasWildcard(doc)) return [];
+      const finding = doc ? findPolicyWildcard(doc) : null;
+      if (!finding) return [];
       return [
         makeViolation(rules[2], resource, {
-          message: 'policy document contains a wildcard Action ("*") or Principal ("*")',
-          remediation: "scope Action/Principal to the specific actions/principals actually needed",
+          message: `policy document contains ${finding}`,
+          remediation: "scope Action/Principal to the specific actions and principals actually needed",
         }),
       ];
     },

@@ -67,6 +67,17 @@ moment this call resolves, success or failure, so a `planId` can never be replay
 | `aws.secrets.kms-rotation-disabled` | `enable_key_rotation` not explicitly `true` on a KMS key |
 | `aws.compute.imdsv1-allowed` | `metadata_options.http_tokens` explicitly `"optional"` on an EC2 instance |
 
+Two checks run **without cloud credentials**, before and alongside the plan-based rules:
+`terraform validate` (catches schema errors — hallucinated resource types, misspelled arguments)
+and a source scan for dangerous literals that plan JSON cannot represent at all. A policy built
+with `jsonencode()` that also interpolates a not-yet-created ARN is unknown at plan time — its
+text appears nowhere in `after`, `after_unknown`, or `configuration` — so an
+`arn:aws:iam::*:role/x` Principal (access from *any* AWS account, not just yours) is invisible to
+the engine and is caught by the source scan instead.
+
+**A failed plan is never reported as clean.** If `terraform plan` can't authenticate, the response
+says outright that the plan-based rules did not run and the result is partial, not passing.
+
 Each rule's "absence is/isn't a violation" direction was individually verified against real
 `terraform-provider-aws` docs before being written, not assumed — see `CLAUDE.md`'s "Things to
 know" for the two cases (S3 encryption, IMDS hardening) where that verification changed the rule
