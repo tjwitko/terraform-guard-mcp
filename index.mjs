@@ -14,6 +14,7 @@ import {
   needsInit,
   terraformInit,
   terraformValidate,
+  classifyValidationErrors,
   looksLikeInitRequired,
   terraformPlan,
   terraformShowJson,
@@ -137,14 +138,42 @@ server.tool(
       if (reinit.status === 0) validate = terraformValidate(resolvedDir);
     }
     if (validate.status !== 0) {
+      // Errors inside a downloaded module are not the caller's to fix. Saying "fix these schema
+      // errors" when every error is in vendored code sends a caller rewriting its own files
+      // forever — observed for real, ten rewrites deep, against terraform-aws-modules/eks pinned
+      // incompatibly with the provider.
+      const { parsed, own, vendored } = classifyValidationErrors(resolvedDir);
+      const raw = (validate.stdout || validate.stderr || "").slice(0, 4000);
+
+      if (parsed && own.length === 0 && vendored.length > 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Refusing to plan-approve: validation failed, but every error is inside a ` +
+                `downloaded module under .terraform/modules — NOT in your own configuration. Do ` +
+                `not rewrite your files; they are not the problem. This almost always means the ` +
+                `module version and the provider version are incompatible. Pin a module release ` +
+                `that supports your provider version, or constrain the provider to one the module ` +
+                `supports.\n\n${vendored.slice(0, 8).join("\n")}${regressionWarning}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const detail = parsed && own.length
+        ? own.slice(0, 10).join("\n") +
+          (vendored.length ? `\n\n(${vendored.length} further error(s) are inside downloaded modules and are not yours to fix.)` : "")
+        : raw;
       return {
         content: [
           {
             type: "text",
             text:
               `Refusing to plan-approve: the configuration is not valid Terraform. No security ` +
-              `scan was performed — fix these schema errors first.\n\n` +
-              `${(validate.stdout || validate.stderr || "").slice(0, 4000)}${regressionWarning}`,
+              `scan was performed — fix these schema errors first.\n\n${detail}${regressionWarning}`,
           },
         ],
         isError: true,
