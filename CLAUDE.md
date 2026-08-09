@@ -154,6 +154,12 @@ before any real API call happens.
   shelling out to the `aws` CLI because the CLI is a second prerequisite that may not be
   installed, and the SDK resolves the ambient credential chain (env → `~/.aws` → SSO → IMDS) the
   same way Terraform does — security-critical logic not worth reimplementing.
+- **A static permission `deny` rule always beats a PreToolUse hook's `allow`.** Verified
+  empirically while building this workspace's `.claude/hooks/terraform-local-guard.mjs`: with
+  `Bash(terraform destroy*)` in the deny list, a hook returning `permissionDecision: "allow"` for
+  a proven-local config was still refused. Any design that layers a hook-based exception on top
+  of a deny rule silently does nothing — the deny entries must be removed and the hook made the
+  sole decision point. Don't re-add them "for defense in depth"; that just disables the hook.
 - **GCP/Azure are not implemented.** The engine and taxonomy are provider-agnostic by design —
   adding `rules/gcp.mjs`/`rules/azure.mjs` and a line in `rules/index.mjs` is the entire
   integration surface, no engine changes needed — but no attribute defaults for either cloud have

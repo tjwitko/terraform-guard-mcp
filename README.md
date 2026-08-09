@@ -148,9 +148,33 @@ Both were considered and deliberately deferred — on a single-user machine wher
 runs as the same OS user as this server, anything the server can read the shell can read too, so
 there is no local secret that constitutes a boundary.
 
+### The local-sandbox hook
+
 A Claude Code permission deny-rule blocking `Bash(terraform apply*)` is a useful *additional*
 layer, but only that: it's a text matcher, and testing confirmed `bash -c "terraform apply"`
 defeats it. It stops the accidental bypass; credential scoping is what stops the effective one.
+
+A static deny-rule also blocks legitimate local sandbox work, which is why this workspace uses a
+`PreToolUse` hook (`.claude/hooks/terraform-local-guard.mjs`) instead. The hook inspects the
+target directory's `.tf` files and allows `apply`/`destroy` only when every cloud-reaching
+provider block declares a localhost endpoint — MinIO/LocalStack work runs freely; anything that
+could reach a real cloud is denied and pushed through `terraform_plan`/`terraform_apply`. It
+fails closed on anything it can't positively prove local, including an unresolvable directory, a
+cloud resource with no provider block at all, and `cd`/`-chdir=` redirection to a cloud config.
+
+Two things worth knowing if you replicate this:
+
+- **A static `deny` rule always beats a hook's `allow`** — verified empirically. Keeping both
+  means the hook's allow can never fire, so the deny entries have to be removed for the bypass to
+  work at all. The hook is strictly stronger than what it replaces: it inspects what a config
+  actually targets rather than pattern-matching command text.
+- **Keying on the config rather than a marker file or path list is deliberate.** Faking a
+  localhost endpoint to get past the check actually redirects Terraform to localhost, so it can't
+  be used to sneak a real-cloud apply through — the check and the effect are the same fact.
+
+The tradeoff, stated plainly: with no deny rule, if hooks are ever disabled nothing at this layer
+blocks a raw apply. That's acceptable precisely because this layer only ever stopped careless
+applies; credential scoping above is the boundary that doesn't depend on local machinery.
 
 ## Known gotchas
 
