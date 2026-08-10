@@ -75,6 +75,22 @@ text appears nowhere in `after`, `after_unknown`, or `configuration` — so an
 `arn:aws:iam::*:role/x` Principal (access from *any* AWS account, not just yours) is invisible to
 the engine and is caught by the source scan instead.
 
+The source scan also refuses **hardcoded provider credentials** — `access_key`/`secret_key`
+(aws), `client_secret` (azurerm), inline service-account JSON (google), `password`, and the rest
+— in any `provider` block. Two things make this worth blocking rather than warning about: a
+credential written into a `.tf` file is committed to version control, and hardcoding a fake one
+is how a configuration that could never deploy still produces a clean plan. That second failure
+was real — an agent-generated EKS config passed `terraform validate`, passed every security rule,
+and passed a pre-commit hook, having bought its clean plan with
+`access_key = "AKIA_DUMMY_ACCESS_KEY"` and `skip_credentials_validation = true`. Findings never
+echo the value.
+
+A provider block that declares a **local endpoint** (`localhost`, `127.0.0.1`,
+`host.docker.internal`) is exempt, because `minioadmin`/`minioadmin` against a container is not a
+leaked cloud credential — `fixtures/aws-secure` relies on exactly that to run a real
+`terraform apply` without an AWS account. The exemption does not cover a syntactically real AWS
+key id (`AKIA…`/`ASIA…`), so adding an `endpoints` block cannot launder a genuine credential.
+
 **A failed plan is never reported as clean.** If `terraform plan` can't authenticate, the response
 says outright that the plan-based rules did not run and the result is partial, not passing.
 

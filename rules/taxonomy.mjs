@@ -22,6 +22,7 @@ export const CATEGORIES = [
   "database.public-access",
   "database.unencrypted",
   "database.no-backups",
+  "secrets.hardcoded-credentials",
   "secrets.kms-policy",
   "secrets.key-rotation",
   "logging.disabled",

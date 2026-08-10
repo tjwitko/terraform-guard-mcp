@@ -16,6 +16,11 @@ provider "aws" {
   secret_key                  = "test"
 }
 
+# The provider block above also trips provider.hardcoded-credentials (no local endpoint declared,
+# unlike aws-secure's MinIO override). That is correct and left as-is: this fixture is never
+# applied, and a config that fakes credentials to get a plan is genuinely insecure. Expect two
+# distinct rule ids from this directory, not one.
+#
 # Deliberately missing an aws_s3_bucket_public_access_block — this is the fixture's whole point,
 # a self-contained example of aws.storage.s3-public-access-block-missing that doesn't require
 # reaching into a sibling repo to demonstrate the block. (The end-to-end tests in this repo also

@@ -187,6 +187,18 @@ before any real API call happens.
   nothing was watching the sequence. Advisory, never blocking — deleting resources is legitimate,
   doing it silently while fixing something else is not. The warning is attached to every response
   path including the failed-plan one, because that is where the thrashing actually happens.
+- **Hardcoded provider credentials are blocked partly because of what they do to the *plan*.**
+  The obvious reason is that a secret in a `.tf` file gets committed. The non-obvious one, and the
+  reason this rule exists at all: there are no env-var equivalents for
+  `skip_credentials_validation`/`skip_requesting_account_id`, so a literal fake key in the
+  provider block is the standard trick for making `terraform plan` succeed with no credentials —
+  and a plan bought that way reports clean on a configuration that cannot deploy. A real agent
+  run did this and passed `validate`, every security rule, and a pre-commit hook. The exemption
+  for provider blocks aimed at `localhost`/`127.0.0.1` exists so this repo's own `aws-secure`
+  fixture (real `apply` against MinIO) doesn't fail the scanner written to prove the scanner
+  works; it deliberately does *not* cover `AKIA…`/`ASIA…`-shaped values, so an `endpoints` block
+  can't launder a genuine key. `actualValue` is `<redacted>` — a finding that echoed the secret
+  would copy it into tool output, agent context, and every log downstream of both.
 - **A wildcard in an ARN's ACCOUNT field is a cross-account hole that looks scoped.**
   `arn:aws:iam::*:role/log-service-role` grants access to anyone who creates that role name in
   their own account. The original rule only matched a bare `"*"` and missed it entirely. Note
