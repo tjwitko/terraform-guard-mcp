@@ -1,0 +1,3 @@
+Insecure on purpose: this is the fixture that proves the scanner detects insecurity.
+It trips storage.s3-public-access-block-missing and provider.hardcoded-credentials.
+Never applied — see fixtures/README context in CLAUDE.md.
