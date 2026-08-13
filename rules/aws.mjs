@@ -1,13 +1,17 @@
 import { makeViolation } from "./engine.mjs";
 
-// Seed AWS rule pack — 7 rules, not the 8 originally planned. The 8th (flag S3 buckets with no
+// AWS rule pack — 9 rules. (Seeded with 7, not the 8 originally planned; The 8th (flag S3 buckets with no
 // aws_s3_bucket_server_side_encryption_configuration) was dropped after checking the real
 // provider docs at implementation time: AWS applies default SSE-S3 encryption to every new
 // bucket automatically since 2023, with or without this resource declared (confirmed via
 // terraform-provider-aws's own docs: "Destroying an
 // aws_s3_bucket_server_side_encryption_configuration resource resets the bucket to Amazon S3
 // bucket default encryption" — implying a default already exists). Flagging its absence would
-// have been a false positive on every ordinary bucket, not a real finding.
+// have been a false positive on every ordinary bucket, not a real finding.)
+//
+// Rules 8 and 9 are a different shape from the rest: they refuse a resource TYPE rather than
+// checking its attributes, because aws_iam_access_key and aws_iam_user exist to create durable
+// credentials and have no secure configuration.
 
 const SENSITIVE_PORTS = [22, 3389, 3306, 5432, 1433, 6379, 27017, 9200];
 
@@ -299,6 +303,59 @@ const rules = [
           remediation: 'set metadata_options { http_tokens = "required" } to require IMDSv2',
           attribute: "metadata_options.http_tokens",
           actualValue: "optional",
+        }),
+      ];
+    },
+  },
+  {
+    id: "aws.iam.access-key-created",
+    category: "iam.long-lived-credential",
+    severity: "critical",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_iam_access_key"],
+    description:
+      "Flags creation of an aws_iam_access_key. This resource exists only to mint a permanent " +
+      "credential — there is no secure configuration of it, so unlike every other rule here it " +
+      "checks nothing about the attributes and refuses the resource itself. The secret also " +
+      "lands in Terraform state in plaintext, so the state file becomes credential material too.",
+    check(resource) {
+      return [
+        makeViolation(rules[7], resource, {
+          message:
+            "creates a long-lived IAM access key; the secret is written to Terraform state in " +
+            "plaintext and never expires on its own",
+          remediation:
+            "use a role instead of a key — IRSA or EKS Pod Identity for Kubernetes workloads, an " +
+            "instance or task role on EC2/ECS, and OIDC federation for CI. If a key is genuinely " +
+            "unavoidable, it does not belong in Terraform.",
+          attribute: null,
+          actualValue: "aws_iam_access_key",
+        }),
+      ];
+    },
+  },
+  {
+    id: "aws.iam.user-as-service-identity",
+    category: "iam.long-lived-credential",
+    severity: "high",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_iam_user"],
+    description:
+      "Flags aws_iam_user. An IAM user is a durable principal authenticated by something it " +
+      "holds — a password or an access key — which is what workload identity replaces. Human " +
+      "access should come from SSO federation, and workloads should assume roles.",
+    check(resource) {
+      return [
+        makeViolation(rules[8], resource, {
+          message: "declares an IAM user, a principal that authenticates with a stored credential",
+          remediation:
+            "federate humans through SSO/OIDC and give workloads roles they assume. An IAM user " +
+            "is only appropriate where a service genuinely cannot assume a role, and that should " +
+            "be a deliberate, documented exception.",
+          attribute: null,
+          actualValue: "aws_iam_user",
         }),
       ];
     },

@@ -317,3 +317,32 @@ test("a resource from an unrelated provider is ignored entirely", () => {
   const violations = evaluate(plan, PROVIDER_PACKS);
   assert.deepEqual(violations, []);
 });
+
+// ---------------------------------------------------------------------------
+// Long-lived credentials — rules that refuse a resource type outright
+// ---------------------------------------------------------------------------
+
+// Unlike every other rule in the pack, these check nothing about the attributes. There is no
+// secure way to configure a resource whose entire purpose is minting a permanent credential, so
+// the resource itself is the finding.
+test("refuses aws_iam_access_key outright", () => {
+  const v = evaluate(planOf(resource({ address: "aws_iam_access_key.ci", type: "aws_iam_access_key" })), PROVIDER_PACKS);
+  assert.deepEqual(v.map((x) => x.ruleId), ["aws.iam.access-key-created"]);
+  assert.equal(v[0].severity, "critical");
+  assert.match(v[0].message, /Terraform state/);
+});
+
+test("flags aws_iam_user as a credential-bearing principal", () => {
+  const v = evaluate(planOf(resource({ address: "aws_iam_user.svc", type: "aws_iam_user" })), PROVIDER_PACKS);
+  assert.deepEqual(v.map((x) => x.ruleId), ["aws.iam.user-as-service-identity"]);
+});
+
+// A role assumed through federation is the thing these rules are steering toward, so it must not
+// itself trip them.
+test("does not flag an IAM role", () => {
+  const v = evaluate(
+    planOf(resource({ address: "aws_iam_role.irsa", type: "aws_iam_role", after: { name: "irsa" } })),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(v, []);
+});

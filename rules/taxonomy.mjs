@@ -12,6 +12,7 @@ export const CATEGORIES = [
   "network.open-ingress",
   "network.flow-logs-disabled",
   "iam.wildcard",
+  "iam.long-lived-credential",
   "iam.public-principal",
   "compute.public-ip",
   "compute.unencrypted-disk",
