@@ -346,3 +346,72 @@ test("does not flag an IAM role", () => {
   );
   assert.deepEqual(v, []);
 });
+
+// ---------------------------------------------------------------------------
+// Resource census — the warning must outlive the call that produced it
+// ---------------------------------------------------------------------------
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import nodePath from "path";
+import { findRemovedResources, pendingRemovals, clearPendingRemovals } from "../lib/resource-census.mjs";
+
+function tfDir(contents) {
+  const dir = mkdtempSync(nodePath.join(tmpdir(), "tfguard-census-"));
+  writeFileSync(nodePath.join(dir, "main.tf"), contents);
+  return dir;
+}
+const BUCKET = 'resource "aws_s3_bucket" "logs" {}\nresource "aws_s3_bucket_versioning" "v" {}\n';
+
+// The bug this pins: findRemovedResources saves the new census on every call, so the second call
+// diffed empty against empty and said nothing. The warning fired exactly once, inside one tool
+// response, and afterwards the stored state claimed no resources had ever existed — which is how
+// a real run deleted three resources and left no way to establish whether the guardrail fired.
+test("a removal stays visible after the call that detected it", () => {
+  const dir = tfDir(BUCKET);
+  try {
+    assert.deepEqual(findRemovedResources(dir), [], "first scan has no prior record");
+
+    writeFileSync(nodePath.join(dir, "main.tf"), 'provider "aws" {}\n');
+    assert.deepEqual(findRemovedResources(dir).sort(), ["aws_s3_bucket.logs", "aws_s3_bucket_versioning.v"]);
+
+    // The call that used to forget everything.
+    assert.deepEqual(findRemovedResources(dir), [], "nothing newly removed on the next scan");
+    assert.deepEqual([...pendingRemovals(dir)].sort(), ["aws_s3_bucket.logs", "aws_s3_bucket_versioning.v"],
+      "but the removal is still on the record");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("restoring a resource clears it, with no dismissal mechanism needed", () => {
+  const dir = tfDir(BUCKET);
+  try {
+    findRemovedResources(dir);
+    writeFileSync(nodePath.join(dir, "main.tf"), 'provider "aws" {}\n');
+    findRemovedResources(dir);
+    assert.equal(pendingRemovals(dir).size, 2);
+
+    writeFileSync(nodePath.join(dir, "main.tf"), BUCKET);
+    findRemovedResources(dir);
+    assert.equal(pendingRemovals(dir).size, 0, "putting it back is the way out");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pendingRemovals does not mutate state, and can be cleared deliberately", () => {
+  const dir = tfDir(BUCKET);
+  try {
+    findRemovedResources(dir);
+    writeFileSync(nodePath.join(dir, "main.tf"), 'provider "aws" {}\n');
+    findRemovedResources(dir);
+
+    assert.equal(pendingRemovals(dir).size, 2);
+    assert.equal(pendingRemovals(dir).size, 2, "reading it twice must give the same answer");
+
+    clearPendingRemovals(dir);
+    assert.equal(pendingRemovals(dir).size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
