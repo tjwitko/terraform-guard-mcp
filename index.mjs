@@ -25,6 +25,7 @@ import {
 import { assumeApplyRole, isScopedCredentialsConfigured } from "./lib/aws-credentials.mjs";
 import { scanTerraformSources } from "./lib/source-scan.mjs";
 import { findRemovedResources } from "./lib/resource-census.mjs";
+import { moduleArgumentHint } from "./lib/module-interface.mjs";
 import { storePlan, lookupPlan, consumePlan } from "./lib/plan-store.mjs";
 import { formatRefusalMessage, worstSeverity } from "./lib/format.mjs";
 import { evaluate } from "./rules/engine.mjs";
@@ -163,6 +164,7 @@ server.tool(
         };
       }
 
+      const moduleHint = moduleArgumentHint(resolvedDir, raw);
       const detail = parsed && own.length
         ? own.slice(0, 10).join("\n") +
           (vendored.length ? `\n\n(${vendored.length} further error(s) are inside downloaded modules and are not yours to fix.)` : "")
@@ -173,7 +175,7 @@ server.tool(
             type: "text",
             text:
               `Refusing to plan-approve: the configuration is not valid Terraform. No security ` +
-              `scan was performed — fix these schema errors first.\n\n${detail}${regressionWarning}`,
+              `scan was performed — fix these schema errors first.\n\n${detail}${moduleHint}${regressionWarning}`,
           },
         ],
         isError: true,

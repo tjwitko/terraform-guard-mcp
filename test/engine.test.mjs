@@ -737,3 +737,67 @@ test("undermined: broad S3 access with no Object Lock anywhere is out of scope",
   );
   assert.ok(!has(evaluate(plan, PROVIDER_PACKS), UNDERMINED));
 });
+
+// ---------------------------------------------------------------------------
+// Credential-shaped variable defaults, and module argument hints
+// ---------------------------------------------------------------------------
+import { scanVariableDefaults } from "../lib/source-scan.mjs";
+import { rejectedArgumentNames, moduleArgumentHint } from "../lib/module-interface.mjs";
+
+const varIds = (f) => f.map((x) => x.ruleId);
+
+// The one that fell through all three scanners in this workspace: gitleaks does not match a
+// generic password, scanProviderCredentials only reads provider blocks, and identity-guard does
+// not read .tf files at all.
+test("variable defaults: flags a credential-shaped variable with a literal default", () => {
+  const f = scanVariableDefaults(
+    'variable "db_password" {\n  type    = string\n  default = "SecurePassword123!"\n}',
+    "variables.tf"
+  );
+  assert.deepEqual(varIds(f), ["variable.credential-default"]);
+  assert.equal(f[0].actualValue, "<redacted>", "a finding must never echo the credential");
+});
+
+// A default is supplied without prompting, so the value deploys whether or not it looks real.
+test("variable defaults: a placeholder default is still the deployed value", () => {
+  assert.equal(scanVariableDefaults('variable "api_token" {\n  default = "changeme"\n}', "v.tf").length, 1);
+});
+
+test("variable defaults: no default is the correct pattern and is not flagged", () => {
+  assert.deepEqual(scanVariableDefaults('variable "db_password" {\n  type = string\n}', "v.tf"), []);
+});
+
+test("variable defaults: empty and interpolated defaults are not literals", () => {
+  assert.deepEqual(scanVariableDefaults('variable "db_password" {\n  default = ""\n}', "v.tf"), []);
+  assert.deepEqual(scanVariableDefaults('variable "db_password" {\n  default = "${var.x}"\n}', "v.tf"), []);
+});
+
+// Names that reference a credential rather than carrying one. A rule that fires on every variable
+// containing "key" produces findings nobody trusts.
+test("variable defaults: identifiers and public keys are not credentials", () => {
+  for (const decl of [
+    'variable "kms_key_id" {\n  default = "arn:aws:kms:us-east-1:1:key/abc"\n}',
+    'variable "ssh_public_key" {\n  default = "ssh-rsa AAAAB3"\n}',
+    'variable "db_secret_arn" {\n  default = "arn:aws:secretsmanager:::secret:x"\n}',
+    'variable "s3_bucket_name" {\n  default = "audit-logs"\n}',
+  ]) {
+    assert.deepEqual(scanVariableDefaults(decl, "v.tf"), [], decl.split("\n")[0]);
+  }
+});
+
+test("module hints: extracts the rejected argument names Terraform reported", () => {
+  assert.deepEqual(
+    rejectedArgumentNames(
+      'eks.tf:9 — Unsupported argument: An argument named "cluster_subnet_ids" is not expected here.\n' +
+        'eks.tf:11 — Unsupported argument: An argument named "cluster_arn" is not expected here.'
+    ),
+    ["cluster_subnet_ids", "cluster_arn"]
+  );
+});
+
+// Silence unless there is something real to say: no unsupported-argument error, or no installed
+// module to read, means no hint rather than a guessed one.
+test("module hints: silent when nothing was rejected or nothing is installed", () => {
+  assert.equal(moduleArgumentHint("/nonexistent", "some unrelated error"), "");
+  assert.equal(moduleArgumentHint("/nonexistent", 'An argument named "x" is not expected here'), "");
+});
