@@ -801,3 +801,47 @@ test("module hints: silent when nothing was rejected or nothing is installed", (
   assert.equal(moduleArgumentHint("/nonexistent", "some unrelated error"), "");
   assert.equal(moduleArgumentHint("/nonexistent", 'An argument named "x" is not expected here'), "");
 });
+
+// ---------------------------------------------------------------------------
+// Credentials assigned in .tfvars
+// ---------------------------------------------------------------------------
+import { scanTfvarsAssignments } from "../lib/source-scan.mjs";
+
+// The variable-default rule shipped, and the very next generated project moved its variables.tf
+// to the correct shape — sensitive = true, no default — then put the secret in terraform.tfvars.
+// All three scanners returned zero. Fixing one variant of a defect class relocates it if the
+// neighbouring file type is never opened.
+test("tfvars: flags credential assignments", () => {
+  const f = scanTfvarsAssignments(
+    'region = "us-east-1"\ndb_password = "dummy_password_must_be_replaced"\ncluster_token = "dummy-token"\n',
+    "terraform.tfvars"
+  );
+  assert.deepEqual(f.map((x) => x.attribute).sort(), ["cluster_token", "db_password"]);
+  assert.ok(f.every((x) => x.actualValue === "<redacted>"), "must never echo the value");
+});
+
+// The remediation has to say this: the generated project added *.tfvars to .gitignore and the
+// value stayed tracked and stayed in history. An ignore rule applied after the fact fixes nothing.
+test("tfvars: remediation covers the already-tracked case", () => {
+  const [f] = scanTfvarsAssignments('db_password = "hunter2"', "terraform.tfvars");
+  assert.match(f.remediation, /does not untrack/);
+  assert.match(f.remediation, /history/);
+});
+
+test("tfvars: non-credential assignments are left alone", () => {
+  for (const line of [
+    'region = "us-east-1"',
+    'db_name = "audit_db"',
+    'db_user = "audit_user"',
+    'cluster_endpoint = "https://example.com"',
+    'security_group_id = "sg-xxxx"',
+    'cluster_ca_certificate = "YmFzZTY0"',
+  ]) {
+    assert.deepEqual(scanTfvarsAssignments(line, "t.tfvars"), [], line);
+  }
+});
+
+test("tfvars: empty and interpolated values are not literals", () => {
+  assert.deepEqual(scanTfvarsAssignments('db_password = ""', "t.tfvars"), []);
+  assert.deepEqual(scanTfvarsAssignments('db_password = "${var.x}"', "t.tfvars"), []);
+});
