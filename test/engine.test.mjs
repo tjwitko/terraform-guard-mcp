@@ -602,3 +602,138 @@ test("object-lock: a bucket with no lock configuration is not this rule's busine
   const v = evaluate(bucketAndLock({ objectLockEnabled: undefined, withConfig: false }), PROVIDER_PACKS);
   assert.ok(!has(v, LOCK_RULE));
 });
+
+// ---------------------------------------------------------------------------
+// Object Lock: retention mode, and permissions that defeat it
+// ---------------------------------------------------------------------------
+
+// Nested blocks arrive as arrays and an unset attribute is null, not absent — verified against a
+// real `terraform show -json`: rule = [{ default_retention: [{ days: 365, mode: null }] }].
+function lockConfig(defaultRetention) {
+  return resource({
+    address: "aws_s3_bucket_object_lock_configuration.lock",
+    type: "aws_s3_bucket_object_lock_configuration",
+    after: defaultRetention === null ? {} : { rule: [{ default_retention: [defaultRetention] }] },
+  });
+}
+const MODE_RULE = "aws.storage.s3-object-lock-retention-mode-missing";
+const UNDERMINED = "aws.storage.s3-object-lock-undermined-by-permissions";
+
+test("object-lock mode: flags a retention period with no mode", () => {
+  const v = evaluate(planOf(lockConfig({ days: 365, mode: null, years: null })), PROVIDER_PACKS);
+  assert.ok(has(v, MODE_RULE), ruleIds(v).join(", "));
+  assert.match(v.find((x) => x.ruleId === MODE_RULE).message, /365 days/);
+});
+
+test("object-lock mode: COMPLIANCE and GOVERNANCE both satisfy the rule", () => {
+  for (const mode of ["COMPLIANCE", "GOVERNANCE"]) {
+    const v = evaluate(planOf(lockConfig({ days: 30, mode, years: null })), PROVIDER_PACKS);
+    assert.ok(!has(v, MODE_RULE), `${mode} should not be flagged by this rule`);
+  }
+});
+
+// GOVERNANCE on its own is a legitimate choice — it protects against accident and is meant to be
+// overridable. It only becomes a finding when the bypass permission is also granted, which is the
+// undermined-by-permissions rule's job, not this one's.
+test("object-lock mode: no retention period declared is not this rule's business", () => {
+  assert.ok(!has(evaluate(planOf(lockConfig(null)), PROVIDER_PACKS), MODE_RULE));
+});
+
+function lockedBucketPlus(...extra) {
+  return planOf(
+    resource({
+      address: "aws_s3_bucket.audit_logs",
+      type: "aws_s3_bucket",
+      after: { object_lock_enabled: true },
+    }),
+    resource({
+      address: "aws_s3_bucket_public_access_block.pab",
+      type: "aws_s3_bucket_public_access_block",
+      after: {
+        block_public_acls: true,
+        block_public_policy: true,
+        ignore_public_acls: true,
+        restrict_public_buckets: true,
+      },
+    }),
+    ...extra
+  );
+}
+
+function attach(name, policyArn) {
+  return resource({
+    address: `aws_iam_role_policy_attachment.${name}`,
+    type: "aws_iam_role_policy_attachment",
+    after: { role: "svc", policy_arn: policyArn },
+  });
+}
+
+test("undermined: AmazonS3FullAccess alongside an Object Lock bucket", () => {
+  const v = evaluate(lockedBucketPlus(attach("s3", "arn:aws:iam::aws:policy/AmazonS3FullAccess")), PROVIDER_PACKS);
+  assert.ok(has(v, UNDERMINED), ruleIds(v).join(", "));
+});
+
+test("undermined: AdministratorAccess counts too", () => {
+  const v = evaluate(lockedBucketPlus(attach("admin", "arn:aws:iam::aws:policy/AdministratorAccess")), PROVIDER_PACKS);
+  assert.ok(has(v, UNDERMINED));
+});
+
+test("undermined: a read-only managed policy is fine", () => {
+  const v = evaluate(lockedBucketPlus(attach("ro", "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess")), PROVIDER_PACKS);
+  assert.ok(!has(v, UNDERMINED));
+});
+
+// The scoped bucket policy the generated project wrote alongside AmazonS3FullAccess. On its own it
+// is exactly right, and must not be flagged — the finding belongs to the broad grant, not this.
+test("undermined: a correctly scoped policy document is not flagged", () => {
+  const scoped = resource({
+    address: "aws_s3_bucket_policy.scoped",
+    type: "aws_s3_bucket_policy",
+    after: {
+      policy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{ Effect: "Allow", Principal: { AWS: "arn:aws:iam::1:role/svc" }, Action: ["s3:PutObject", "s3:GetObject", "s3:ListBucket"], Resource: ["arn:aws:s3:::b/*"] }],
+      }),
+    },
+  });
+  assert.ok(!has(evaluate(lockedBucketPlus(scoped), PROVIDER_PACKS), UNDERMINED));
+});
+
+test("undermined: an inline policy granting s3:DeleteObject is flagged", () => {
+  const del = resource({
+    address: "aws_iam_role_policy.inline",
+    type: "aws_iam_role_policy",
+    after: {
+      policy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{ Effect: "Allow", Action: ["s3:PutObject", "s3:DeleteObjectVersion"], Resource: "*" }],
+      }),
+    },
+  });
+  assert.ok(has(evaluate(lockedBucketPlus(del), PROVIDER_PACKS), UNDERMINED));
+});
+
+// Deny restricts; it cannot grant. Flagging it would report the safest possible configuration.
+test("undermined: the same actions inside a Deny are not a grant", () => {
+  const deny = resource({
+    address: "aws_iam_role_policy.deny",
+    type: "aws_iam_role_policy",
+    after: {
+      policy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{ Effect: "Deny", Action: ["s3:DeleteObject", "s3:BypassGovernanceRetention"], Resource: "*" }],
+      }),
+    },
+  });
+  assert.ok(!has(evaluate(lockedBucketPlus(deny), PROVIDER_PACKS), UNDERMINED));
+});
+
+// Without Object Lock there is no immutability claim to undermine, and flagging every broad S3
+// grant in every project is a different rule with a much higher false-positive cost.
+test("undermined: broad S3 access with no Object Lock anywhere is out of scope", () => {
+  const plan = planOf(
+    resource({ address: "aws_s3_bucket.plain", type: "aws_s3_bucket", after: {} }),
+    attach("s3", "arn:aws:iam::aws:policy/AmazonS3FullAccess")
+  );
+  assert.ok(!has(evaluate(plan, PROVIDER_PACKS), UNDERMINED));
+});

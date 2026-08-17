@@ -490,6 +490,115 @@ const rules = [
         );
     },
   },
+  {
+    id: "aws.storage.s3-object-lock-retention-mode-missing",
+    category: "storage.immutability",
+    severity: "critical",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_s3_bucket_object_lock_configuration"],
+    description:
+      "Flags a default_retention block that sets a period but no mode. The AWS API requires a " +
+      "mode alongside days/years, so the apply fails — and until it does the configuration reads " +
+      "as though a retention period is in force when none is.",
+    check(resource) {
+      const retention = (resource.change.after || {})?.rule?.[0]?.default_retention?.[0];
+      // Absent block entirely: nothing claims a retention period, so there is nothing to
+      // contradict. Only a period-without-mode is unambiguously broken.
+      if (!retention) return [];
+      if (retention.mode) return [];
+      if (retention.days == null && retention.years == null) return [];
+      return [
+        makeViolation(rules[11], resource, {
+          message:
+            `sets a retention period (${retention.days ?? retention.years} ` +
+            `${retention.days != null ? "days" : "years"}) with no mode`,
+          remediation:
+            'set mode = "COMPLIANCE". Prefer it over GOVERNANCE for an audit trail: GOVERNANCE ' +
+            "retention can be lifted by any principal holding s3:BypassGovernanceRetention, so it " +
+            "protects against accident rather than against intent. COMPLIANCE cannot be overridden " +
+            "by anyone, including the account root, until the period expires.",
+          attribute: "rule.default_retention.mode",
+          actualValue: null,
+        }),
+      ];
+    },
+  },
+  {
+    id: "aws.storage.s3-object-lock-undermined-by-permissions",
+    category: "storage.immutability",
+    severity: "critical",
+    provider: "aws",
+    kind: "aggregate",
+    resourceTypes: ["aws_s3_bucket"],
+    description:
+      "Flags a plan that turns on S3 Object Lock while also granting a principal the permissions " +
+      "that defeat it — deleting object versions, rewriting retention, or bypassing GOVERNANCE. " +
+      "IAM evaluates the union of identity and resource policies, so a broad identity grant " +
+      "nullifies a carefully scoped bucket policy sitting next to it.",
+    check(index) {
+      // Only relevant where something actually claims immutability.
+      const lockedBuckets = index
+        .byType("aws_s3_bucket")
+        .filter((b) => (b.change.after || {}).object_lock_enabled === true);
+      const hasLockConfig = index.byType("aws_s3_bucket_object_lock_configuration").length > 0;
+      if (lockedBuckets.length === 0 && !hasLockConfig) return [];
+
+      const grants = [];
+
+      // AWS-managed policies that carry the defeating permissions. AmazonS3FullAccess includes
+      // s3:DeleteObjectVersion, s3:PutObjectRetention and s3:BypassGovernanceRetention — on every
+      // bucket in the account, not the one the bucket policy names.
+      const BROAD_MANAGED = /\/(AmazonS3FullAccess|AdministratorAccess|PowerUserAccess)$/;
+      for (const type of [
+        "aws_iam_role_policy_attachment",
+        "aws_iam_user_policy_attachment",
+        "aws_iam_group_policy_attachment",
+      ]) {
+        for (const att of index.byType(type)) {
+          const arn = (att.change.after || {}).policy_arn;
+          if (typeof arn === "string" && BROAD_MANAGED.test(arn)) {
+            grants.push({ resource: att, what: arn.split("/").pop() });
+          }
+        }
+      }
+
+      // Inline and customer-managed policy documents. Unresolvable documents are skipped rather
+      // than guessed at, the same call the wildcard rule makes and for the same reason.
+      const DEFEATING = /^s3:(\*|DeleteObject|DeleteObjectVersion|PutObjectRetention|PutObjectLegalHold|BypassGovernanceRetention|PutBucketPolicy)$/i;
+      for (const type of ["aws_iam_policy", "aws_iam_role_policy", "aws_s3_bucket_policy"]) {
+        for (const pol of index.byType(type)) {
+          const doc = extractPolicyJson(pol);
+          if (!doc) continue;
+          const statements = Array.isArray(doc.Statement) ? doc.Statement : [doc.Statement];
+          for (const st of statements) {
+            if (!st || st.Effect !== "Allow") continue; // Deny restricts; it cannot grant
+            const actions = Array.isArray(st.Action) ? st.Action : [st.Action];
+            const bad = actions.filter((a) => typeof a === "string" && (a === "*" || DEFEATING.test(a)));
+            if (bad.length) grants.push({ resource: pol, what: bad.join(", ") });
+          }
+        }
+      }
+
+      if (grants.length === 0) return [];
+
+      return grants.map((g) =>
+        makeViolation(rules[12], g.resource, {
+          message:
+            `grants ${g.what}, which can delete or re-date objects in a bucket this plan puts ` +
+            `under Object Lock — the immutability is defeatable by the workload it protects`,
+          remediation:
+            "grant only the actions the workload calls — typically s3:PutObject, s3:GetObject and " +
+            "s3:ListBucket on that one bucket's ARN. Note a scoped aws_s3_bucket_policy does not " +
+            "fix this: IAM takes the union of identity and resource policies, so the broader grant " +
+            "wins. If a delete path is genuinely required, it belongs on a separate role that the " +
+            "service does not assume.",
+          attribute: "policy",
+          actualValue: g.what,
+        })
+      );
+    },
+  },
 ];
 
 export default rules;
