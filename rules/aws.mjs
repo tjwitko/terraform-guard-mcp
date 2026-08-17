@@ -15,7 +15,19 @@ import { makeViolation } from "./engine.mjs";
 
 const SENSITIVE_PORTS = [22, 3389, 3306, 5432, 1433, 6379, 27017, 9200];
 
-function portRangeCoversSensitive(fromPort, toPort) {
+// "-1" means every protocol on every port, and AWS ignores from_port/to_port entirely when it is
+// set — the documented convention is to write them as 0/0. That form was invisible here: 0/0 fails
+// the "0..65535" test and contains no sensitive port, so the single most permissive security group
+// AWS allows (all protocols, all ports, 0.0.0.0/0) passed clean while SSH-from-anywhere was caught.
+// Found in a real generated project whose plan the gate approved.
+function coversEverything(protocol) {
+  if (protocol == null) return false;
+  const p = String(protocol).toLowerCase();
+  return p === "-1" || p === "all";
+}
+
+function portRangeCoversSensitive(fromPort, toPort, protocol) {
+  if (coversEverything(protocol)) return true;
   if (fromPort == null || toPort == null) return true; // unbounded/unresolved — treat conservatively as open
   if (fromPort <= 0 && toPort >= 65535) return true;
   return SENSITIVE_PORTS.some((p) => p >= fromPort && p <= toPort);
@@ -146,10 +158,14 @@ const rules = [
         (after.ingress || []).forEach((block, i) => {
           const openV4 = isOpenIpv4(block.cidr_blocks);
           const openV6 = isOpenIpv6(block.ipv6_cidr_blocks);
-          if ((openV4 || openV6) && portRangeCoversSensitive(block.from_port, block.to_port)) {
+          if ((openV4 || openV6) && portRangeCoversSensitive(block.from_port, block.to_port, block.protocol)) {
             violations.push(
               makeViolation(rules[1], resource, {
-                message: `ingress[${i}] allows ${openV4 ? "0.0.0.0/0" : "::/0"} on port ${block.from_port}-${block.to_port}`,
+                message:
+                  `ingress[${i}] allows ${openV4 ? "0.0.0.0/0" : "::/0"} on ` +
+                  (coversEverything(block.protocol)
+                    ? `every port and every protocol`
+                    : `port ${block.from_port}-${block.to_port}`),
                 remediation: "restrict cidr_blocks/ipv6_cidr_blocks to a known range, or remove the rule if unneeded",
                 attribute: `ingress[${i}]`,
                 actualValue: openV4 ? block.cidr_blocks : block.ipv6_cidr_blocks,
@@ -160,10 +176,14 @@ const rules = [
       } else if (resource.type === "aws_vpc_security_group_ingress_rule") {
         const openV4 = after.cidr_ipv4 === "0.0.0.0/0";
         const openV6 = after.cidr_ipv6 === "::/0";
-        if ((openV4 || openV6) && portRangeCoversSensitive(after.from_port, after.to_port)) {
+        if ((openV4 || openV6) && portRangeCoversSensitive(after.from_port, after.to_port, after.ip_protocol)) {
           violations.push(
             makeViolation(rules[1], resource, {
-              message: `allows ${openV4 ? after.cidr_ipv4 : after.cidr_ipv6} on port ${after.from_port}-${after.to_port}`,
+              message:
+              `allows ${openV4 ? after.cidr_ipv4 : after.cidr_ipv6} on ` +
+              (coversEverything(after.ip_protocol)
+                ? `every port and every protocol`
+                : `port ${after.from_port}-${after.to_port}`),
               remediation: "restrict cidr_ipv4/cidr_ipv6 to a known range, or remove the rule if unneeded",
               attribute: openV4 ? "cidr_ipv4" : "cidr_ipv6",
               actualValue: openV4 ? after.cidr_ipv4 : after.cidr_ipv6,
@@ -429,6 +449,45 @@ const rules = [
       }
 
       return violations;
+    },
+  },
+  {
+    id: "aws.storage.s3-object-lock-not-enabled-on-bucket",
+    category: "storage.immutability",
+    severity: "critical",
+    provider: "aws",
+    kind: "aggregate",
+    resourceTypes: ["aws_s3_bucket"],
+    description:
+      "Flags an aws_s3_bucket_object_lock_configuration whose bucket was not created with " +
+      "object_lock_enabled = true. Object Lock can only be turned on at bucket creation, so this " +
+      "combination fails at apply — and until it does, the configuration reads as though the " +
+      "objects are immutable when nothing is enforcing it.",
+    check(index) {
+      const buckets = index.byType("aws_s3_bucket");
+      const configs = index.byType("aws_s3_bucket_object_lock_configuration");
+      if (configs.length === 0) return [];
+
+      return buckets
+        // Same module_address matching as the public-access-block rule, and for the same reason:
+        // a new bucket's id is unresolved at plan time, so the configuration's
+        // `bucket = aws_s3_bucket.this.id` reference has no literal value to match on.
+        .filter((bucket) => configs.some((c) => c.module_address === bucket.module_address))
+        .filter((bucket) => (bucket.change.after || {}).object_lock_enabled !== true)
+        .map((bucket) =>
+          makeViolation(rules[10], bucket, {
+            message:
+              "an object lock configuration targets this bucket, but the bucket is not created " +
+              "with object_lock_enabled = true",
+            remediation:
+              "add `object_lock_enabled = true` to the aws_s3_bucket. It can only be set at " +
+              "creation, so a bucket that already exists without it must be replaced — and give " +
+              "the lock configuration a depends_on the bucket's versioning resource, which " +
+              "Object Lock requires and Terraform will not order on its own.",
+            attribute: "object_lock_enabled",
+            actualValue: (bucket.change.after || {}).object_lock_enabled ?? null,
+          })
+        );
     },
   },
 ];

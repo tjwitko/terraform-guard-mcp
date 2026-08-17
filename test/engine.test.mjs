@@ -486,3 +486,119 @@ test("duplicate-policy-attachment: never flags on values unresolved at plan time
   );
   assert.deepEqual(evaluate(plan, PROVIDER_PACKS), []);
 });
+
+// ---------------------------------------------------------------------------
+// Security groups: protocol "-1" covers every port
+// ---------------------------------------------------------------------------
+
+// A real generated project shipped protocol="-1" with from_port/to_port both 0 — the documented
+// way to write "all traffic", since AWS ignores the port fields entirely when protocol is -1.
+// The gate approved it: 0/0 fails the 0..65535 test and contains no sensitive port. SSH from
+// anywhere was caught while allow-everything-from-anywhere was not.
+function sgWith(ingress) {
+  return planOf(
+    resource({
+      address: "aws_security_group.eks_sg",
+      type: "aws_security_group",
+      after: { ingress },
+    })
+  );
+}
+
+test("sg-open-ingress: flags protocol -1 from anywhere, ports written as 0/0", () => {
+  const v = evaluate(
+    sgWith([{ protocol: "-1", from_port: 0, to_port: 0, cidr_blocks: ["0.0.0.0/0"] }]),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(ruleIds(v), ["aws.network.sg-open-ingress-sensitive-port"]);
+  assert.match(v[0].message, /every port and every protocol/);
+});
+
+test("sg-open-ingress: still flags a sensitive port on a named protocol", () => {
+  const v = evaluate(
+    sgWith([{ protocol: "tcp", from_port: 22, to_port: 22, cidr_blocks: ["0.0.0.0/0"] }]),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(ruleIds(v), ["aws.network.sg-open-ingress-sensitive-port"]);
+  assert.match(v[0].message, /port 22-22/);
+});
+
+// Deliberately not flagged: the rule is scoped to sensitive ports, and a public app port behind a
+// LoadBalancer is ordinary. Pinned so "-1" support does not quietly widen this into noise.
+test("sg-open-ingress: a benign public app port stays unflagged", () => {
+  assert.deepEqual(
+    evaluate(sgWith([{ protocol: "tcp", from_port: 8000, to_port: 8000, cidr_blocks: ["0.0.0.0/0"] }]), PROVIDER_PACKS),
+    []
+  );
+});
+
+test("sg-open-ingress: protocol -1 restricted to a known CIDR is not flagged", () => {
+  assert.deepEqual(
+    evaluate(sgWith([{ protocol: "-1", from_port: 0, to_port: 0, cidr_blocks: ["10.0.0.0/16"] }]), PROVIDER_PACKS),
+    []
+  );
+});
+
+test("sg-open-ingress: covers ip_protocol on the newer per-rule resource", () => {
+  const plan = planOf(
+    resource({
+      address: "aws_vpc_security_group_ingress_rule.open",
+      type: "aws_vpc_security_group_ingress_rule",
+      after: { cidr_ipv4: "0.0.0.0/0", ip_protocol: "-1", from_port: null, to_port: null },
+    })
+  );
+  assert.deepEqual(ruleIds(evaluate(plan, PROVIDER_PACKS)), ["aws.network.sg-open-ingress-sensitive-port"]);
+});
+
+// ---------------------------------------------------------------------------
+// S3 Object Lock must be enabled on the bucket itself
+// ---------------------------------------------------------------------------
+
+// Object Lock can only be turned on at bucket creation. Two separate generated projects declared
+// an object lock configuration against a bucket without it: `terraform validate` passed, the plan
+// passed, every rule passed, and the apply would fail — while the configuration read as though
+// the audit log were immutable. The one control the whole project existed for.
+function bucketAndLock({ objectLockEnabled, withConfig = true }) {
+  const rs = [
+    resource({
+      address: "aws_s3_bucket.logs",
+      type: "aws_s3_bucket",
+      after: objectLockEnabled === undefined ? {} : { object_lock_enabled: objectLockEnabled },
+    }),
+  ];
+  if (withConfig) {
+    rs.push(
+      resource({
+        address: "aws_s3_bucket_object_lock_configuration.logs_lock",
+        type: "aws_s3_bucket_object_lock_configuration",
+        after: {},
+      })
+    );
+  }
+  return planOf(...rs);
+}
+
+const LOCK_RULE = "aws.storage.s3-object-lock-not-enabled-on-bucket";
+const has = (v, id) => v.some((x) => x.ruleId === id);
+
+test("object-lock: flags a lock configuration on a bucket missing object_lock_enabled", () => {
+  const v = evaluate(bucketAndLock({ objectLockEnabled: undefined }), PROVIDER_PACKS);
+  assert.ok(has(v, LOCK_RULE), `expected ${LOCK_RULE}, got ${ruleIds(v).join(", ")}`);
+});
+
+test("object-lock: flags an explicit false just as it flags absence", () => {
+  const v = evaluate(bucketAndLock({ objectLockEnabled: false }), PROVIDER_PACKS);
+  assert.ok(has(v, LOCK_RULE));
+});
+
+test("object-lock: a correctly enabled bucket is not flagged", () => {
+  const v = evaluate(bucketAndLock({ objectLockEnabled: true }), PROVIDER_PACKS);
+  assert.ok(!has(v, LOCK_RULE), `unexpected ${LOCK_RULE}`);
+});
+
+// Without a lock configuration there is no claim of immutability to contradict, and demanding
+// Object Lock on every bucket in every project would be false positives on ordinary storage.
+test("object-lock: a bucket with no lock configuration is not this rule's business", () => {
+  const v = evaluate(bucketAndLock({ objectLockEnabled: undefined, withConfig: false }), PROVIDER_PACKS);
+  assert.ok(!has(v, LOCK_RULE));
+});

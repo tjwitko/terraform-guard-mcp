@@ -9,6 +9,7 @@
 export const CATEGORIES = [
   "storage.public-access",
   "storage.encryption",
+  "storage.immutability",
   "network.open-ingress",
   "network.flow-logs-disabled",
   "iam.wildcard",
