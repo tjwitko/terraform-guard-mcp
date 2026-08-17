@@ -14,6 +14,7 @@ export const CATEGORIES = [
   "iam.wildcard",
   "iam.long-lived-credential",
   "iam.public-principal",
+  "iam.duplicate-attachment",
   "compute.public-ip",
   "compute.unencrypted-disk",
   "compute.imds-hardening",

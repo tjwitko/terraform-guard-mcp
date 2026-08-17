@@ -415,3 +415,74 @@ test("pendingRemovals does not mutate state, and can be cleared deliberately", (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Duplicate policy attachments
+// ---------------------------------------------------------------------------
+
+// Found in a real generated project: three differently-named resources attaching
+// AmazonEKS_CNI_Policy to the same node role. `terraform validate` reported "Success!" — the
+// syntax is fine — and the duplicates were the fingerprint of a model guessing policy ARNs it
+// could not look up. Nothing in the stack caught it.
+function attachment(name, role, policyArn, overrides = {}) {
+  return resource({
+    address: `aws_iam_role_policy_attachment.${name}`,
+    type: "aws_iam_role_policy_attachment",
+    name,
+    after: { role, policy_arn: policyArn },
+    ...overrides,
+  });
+}
+
+const CNI = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy";
+const ECR = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly";
+
+test("duplicate-policy-attachment: flags the same policy attached twice to one role", () => {
+  const plan = planOf(
+    attachment("eks_nodes_cni", "nodes-role", CNI),
+    attachment("eks_nodes_cgroup", "nodes-role", CNI)
+  );
+  const violations = evaluate(plan, PROVIDER_PACKS);
+  assert.deepEqual(ruleIds(violations), ["aws.iam.duplicate-policy-attachment"]);
+  // One finding per duplicate group, naming every member — not one per resource, which would
+  // report the same defect twice and bury which resources are actually involved.
+  assert.match(violations[0].message, /eks_nodes_cgroup/);
+  assert.match(violations[0].message, /eks_nodes_cni/);
+});
+
+test("duplicate-policy-attachment: reports one finding for a group of three", () => {
+  const plan = planOf(
+    attachment("a", "nodes-role", CNI),
+    attachment("b", "nodes-role", CNI),
+    attachment("c", "nodes-role", CNI)
+  );
+  const violations = evaluate(plan, PROVIDER_PACKS);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0].message, /^3 aws_iam_role_policy_attachment/);
+});
+
+test("duplicate-policy-attachment: different policies on one role are fine", () => {
+  const plan = planOf(
+    attachment("cni", "nodes-role", CNI),
+    attachment("ecr", "nodes-role", ECR)
+  );
+  assert.deepEqual(evaluate(plan, PROVIDER_PACKS), []);
+});
+
+test("duplicate-policy-attachment: the same policy on different roles is fine", () => {
+  const plan = planOf(
+    attachment("nodes", "nodes-role", CNI),
+    attachment("other", "other-role", CNI)
+  );
+  assert.deepEqual(evaluate(plan, PROVIDER_PACKS), []);
+});
+
+// A rule that blocks an apply must never guess. When the principal is computed, two attachments
+// that look identical may well name different roles — so an unresolved value is not a duplicate.
+test("duplicate-policy-attachment: never flags on values unresolved at plan time", () => {
+  const plan = planOf(
+    attachment("a", null, CNI, { after: { policy_arn: CNI }, after_unknown: { role: true } }),
+    attachment("b", null, CNI, { after: { policy_arn: CNI }, after_unknown: { role: true } })
+  );
+  assert.deepEqual(evaluate(plan, PROVIDER_PACKS), []);
+});

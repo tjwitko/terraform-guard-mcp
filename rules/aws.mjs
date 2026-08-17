@@ -360,6 +360,77 @@ const rules = [
       ];
     },
   },
+  {
+    id: "aws.iam.duplicate-policy-attachment",
+    category: "iam.duplicate-attachment",
+    severity: "medium",
+    provider: "aws",
+    kind: "aggregate",
+    resourceTypes: [
+      "aws_iam_role_policy_attachment",
+      "aws_iam_user_policy_attachment",
+      "aws_iam_group_policy_attachment",
+    ],
+    description:
+      "Flags two or more attachment resources binding the same managed policy to the same " +
+      "principal. No correct configuration does this: the duplicates fight over one piece of " +
+      "real state, so destroying either detaches the policy while the others still believe it " +
+      "is attached. AttachRolePolicy is idempotent, so AWS accepts it silently and the defect " +
+      "only surfaces later.",
+    check(index) {
+      // Attribute naming the principal differs per attachment type; the duplicate test is
+      // otherwise identical, so the types are driven from this table rather than copied.
+      const PRINCIPAL_ATTR = {
+        aws_iam_role_policy_attachment: "role",
+        aws_iam_user_policy_attachment: "user",
+        aws_iam_group_policy_attachment: "group",
+      };
+      const violations = [];
+
+      for (const [type, principalAttr] of Object.entries(PRINCIPAL_ATTR)) {
+        const groups = new Map();
+
+        for (const resource of index.byType(type)) {
+          const after = resource.change.after || {};
+          const unknown = resource.change.after_unknown || {};
+          // Never compare values Terraform has not resolved. Two attachments whose principal is
+          // computed may well name different principals, and a rule that blocks an apply has to
+          // be certain — the same discipline the S3/PAB rule follows. Verified against real plan
+          // JSON that both fields resolve to literals in the ordinary case, so skipping the
+          // unknown ones costs almost nothing.
+          if (unknown[principalAttr] === true || unknown.policy_arn === true) continue;
+          const principal = after[principalAttr];
+          const policyArn = after.policy_arn;
+          if (typeof principal !== "string" || typeof policyArn !== "string") continue;
+
+          const key = `${principal} ${policyArn}`;
+          if (!groups.has(key)) groups.set(key, { principal, policyArn, members: [] });
+          groups.get(key).members.push(resource);
+        }
+
+        for (const { principal, policyArn, members } of groups.values()) {
+          if (members.length < 2) continue;
+          const addresses = members.map((m) => m.address).sort();
+          violations.push(
+            makeViolation(rules[9], null, {
+              message:
+                `${members.length} ${type} resources attach the same policy to ${principal}: ` +
+                addresses.join(", "),
+              remediation:
+                `keep one attachment and delete the others. Duplicates under different resource ` +
+                `names usually mean the policy ARNs were guessed rather than looked up — check ` +
+                `that ${policyArn} is a real managed policy and that the attachments this was ` +
+                `meant to be were not lost in the process.`,
+              attribute: "policy_arn",
+              actualValue: policyArn,
+            })
+          );
+        }
+      }
+
+      return violations;
+    },
+  },
 ];
 
 export default rules;
