@@ -184,3 +184,76 @@ provider "aws" {
     ["access_key"]
   );
 });
+
+// ---------------------------------------------------------------------------
+// Cross-cloud: this module is the only enforcement path that runs without
+// credentials, and across sixteen agent runs it is the only one that has ever
+// evaluated a generated deliverable — every plan-based rule was skipped because
+// no generated project could produce a plan. Rules added here actually execute.
+// ---------------------------------------------------------------------------
+
+// Verified against Google's IAM principal-identifiers documentation, not recalled: allUsers is
+// anyone on the internet; allAuthenticatedUsers is anyone with a Google account, personal Gmail
+// included. The AWS analogue (Principal = "*") has been covered since this module existed.
+test("catches Google's public principals in an IAM member and an IAM binding", () => {
+  const found = withTf(`
+resource "google_storage_bucket_iam_member" "public" {
+  bucket = google_storage_bucket.data.name
+  role   = "roles/storage.objectViewer"
+  member = "allUsers"
+}
+resource "google_cloud_run_service_iam_binding" "invokers" {
+  service = google_cloud_run_service.api.name
+  role    = "roles/run.invoker"
+  members = ["allAuthenticatedUsers"]
+}
+`);
+  assert.deepEqual(ids(found), ["google.iam.public-principal", "google.iam.public-principal"]);
+  assert.deepEqual(found.map((f) => f.actualValue).sort(), ["allAuthenticatedUsers", "allUsers"]);
+});
+
+// The same false-positive shape as an AWS Deny statement: a deny policy names these principals in
+// order to restrict them. A scanner that flags correct hardening is one people switch off.
+test("does not flag Google's public principals inside a deny policy", () => {
+  const found = withTf(`
+resource "google_iam_deny_policy" "lockdown" {
+  name = "deny-public"
+  rules {
+    deny_rule {
+      denied_principals  = ["allUsers", "allAuthenticatedUsers"]
+      denied_permissions = ["storage.googleapis.com/objects.delete"]
+    }
+  }
+}
+`);
+  assert.deepEqual(found, []);
+});
+
+// The local-emulator exemption is keyed on the AWS provider's `endpoints {}` syntax, but the value
+// it was excusing did not have to be an AWS credential — the override was a single AWS
+// access-key-id pattern, so a PEM key or a Google service-account key pasted into the same block
+// was laundered through it.
+test("a non-AWS credential is still flagged inside a local-emulator provider block", () => {
+  const found = withTf(`
+provider "aws" {
+  access_key  = "minioadmin"
+  private_key = "-----BEGIN PRIVATE KEY-----MIIEvQIBADANBg-----END PRIVATE KEY-----"
+  endpoints { s3 = "http://localhost:9100" }
+}
+`);
+  assert.deepEqual(ids(found), ["provider.hardcoded-credentials"]);
+  assert.equal(found[0].actualValue, "<redacted>");
+});
+
+// Regression guard for the exemption itself: this repo's own aws-secure fixture hardcodes
+// minioadmin against 127.0.0.1 so it can run a real apply, and must keep passing.
+test("still exempts genuine local-emulator credentials", () => {
+  const found = withTf(`
+provider "aws" {
+  access_key = "minioadmin"
+  secret_key = "minioadmin"
+  endpoints { s3 = "http://localhost:9100" }
+}
+`);
+  assert.deepEqual(found, []);
+});
