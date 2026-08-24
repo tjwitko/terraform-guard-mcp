@@ -304,3 +304,36 @@ resource "aws_cognito_user_pool" "p" {
 `);
   assert.deepEqual(found, []);
 });
+
+// Matched on the value, not the name — the gap every other rule here leaves. A generated project
+// wrote a Postgres URL with an embedded password into a .tfvars file under the name `database_url`,
+// which is not credential-shaped, so the name-based rule was silent. It was raised in review and
+// shipped anyway, which is the argument for a check rather than a comment.
+test("catches a connection string carrying its own password, whatever the name", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tfguard-scan-"));
+  writeFileSync(
+    path.join(dir, "dev.tfvars"),
+    // The line-level opt-outs below sit on the string itself, not above it: both scanners match per
+    // line, and this string IS the thing under test.
+    'database_url = "postgresql://log_admin:REPLACE_ME_PASSWORD@db_endpoint_placeholder/audit_logs"\n' // identity-guard:allow test material; gitleaks:allow
+  );
+  try {
+    const found = scanTerraformSources(dir);
+    assert.deepEqual(ids(found), ["connection-string.embedded-password"]);
+    assert.equal(found[0].actualValue, "<redacted>");
+    assert.match(found[0].message, /postgresql connection string/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A URL is not a credential. Flagging every endpoint would make this rule noise, and the
+// interpolated form is a reference rather than a literal.
+test("does not flag URLs with no embedded password", () => {
+  const found = withTf(`
+variable "endpoint" { default = "https://api.internal/v1" }
+variable "no_pw"    { default = "postgresql://reader@db.internal/app" }
+variable "interp"   { default = "postgresql://u:\${var.pw}@db/app" } // identity-guard:allow test material; gitleaks:allow
+`);
+  assert.deepEqual(found, []);
+});
