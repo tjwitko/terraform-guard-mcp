@@ -161,8 +161,32 @@ before any real API call happens.
   skipped. Credential failures are now detected specifically and the response says outright that
   the plan-based rules did not run. Note there are **no environment-variable equivalents** for
   `skip_credentials_validation` or `skip_requesting_account_id` (only `skip_metadata_api_check` has
-  one, `AWS_EC2_METADATA_DISABLED`), so injecting dummy credentials cannot force an offline plan —
-  verified directly; don't try to "fix" it that way.
+  one, `AWS_EC2_METADATA_DISABLED`), so injecting dummy credentials cannot on its own force an
+  offline plan — verified directly. `lib/plan-inputs.mjs` gets there anyway, via a different route.
+- **`lib/plan-inputs.mjs` makes a plan possible so the rules have something to evaluate, and the
+  price is that the plan can never be applied.** Across sixteen agent runs not one generated
+  project ever produced a plan, so not one plan-based rule ever ran. The causes were counted, not
+  guessed: four runs blocked on a required variable with no value, two on the machine having no
+  cloud account, two on real configuration errors. Only the last class is the configuration's
+  fault — a flawless project failed identically. The module supplies `TF_VAR_*` values for
+  variables nothing else provides, placeholder credentials for providers that cannot otherwise
+  authenticate, and a scanner-owned `*_override.tf` carrying the three `skip_*` settings, deleted
+  in a `finally` before the call returns. Three rules keep it honest:
+  1. **Real inputs always win.** A machine with a real account, a `terraform.tfvars`, or a provider
+     block carrying its own credentials is left completely untouched. Without that last check this
+     repo's own `aws-secure` fixture would be treated as credential-less and denied a planId,
+     breaking the end-to-end test that proves the plan→apply guarantee.
+  2. **Any injection makes the plan scan-only: `planId` is `null` and `applyable` is `false`.**
+     Terraform writes variable *values* into the plan file — unlike credentials, which the provider
+     re-resolves at apply — so applying such a plan would deploy a database whose password is
+     literally `tfguard-scan-placeholder-01`. The chokepoint stays exactly as strict as it was.
+  3. **Only `terraform.tfvars` and `*.auto.tfvars` count as supplying a value.** A run wrote
+     `dummy.tfvars`, believed the variable was supplied, and could not plan for the rest of the run.
+  Measured effect: a config with an unencrypted, publicly-accessible RDS instance now returns
+  `aws.database.rds-unencrypted` and `aws.database.rds-publicly-accessible` on a machine with no
+  AWS account at all. Note this is the same mechanism as the "buy a clean plan with fake
+  credentials" trick that the hardcoded-credentials rule exists to catch; the difference is that it
+  lives in a scanner-owned file, lasts one call, and cannot produce an applyable plan.
 - **`lib/source-scan.mjs` exists because some dangerous literals are structurally absent from
   plan JSON.** A policy built with `jsonencode({... Principal = {AWS = "arn:aws:iam::*:role/x"} ...})`
   that also interpolates a not-yet-created ARN is unknown at plan time: verified directly that

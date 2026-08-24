@@ -24,6 +24,7 @@ import {
 } from "./lib/terraform-cli.mjs";
 import { assumeApplyRole, isScopedCredentialsConfigured } from "./lib/aws-credentials.mjs";
 import { scanTerraformSources } from "./lib/source-scan.mjs";
+import { planInputs, writeScanOverride, removeScanOverride } from "./lib/plan-inputs.mjs";
 import { findRemovedResources } from "./lib/resource-census.mjs";
 import { moduleArgumentHint } from "./lib/module-interface.mjs";
 import { storePlan, lookupPlan, consumePlan } from "./lib/plan-store.mjs";
@@ -184,7 +185,23 @@ server.tool(
 
     const tmpPlanPath = path.join(os.tmpdir(), `tfguard-${randomUUID()}.tfplan`);
     const varFileArg = var_file ? path.join(resolvedDir, var_file) : undefined;
-    const plan = terraformPlan(resolvedDir, tmpPlanPath, varFileArg);
+    // Supply whatever this configuration needs in order to plan at all, and remember that we did.
+    // Sixteen agent runs produced sixteen unscanned deliverables: four blocked on a required
+    // variable with no value, two on the machine having no cloud account. Neither is a property of
+    // the configuration -- a flawless project failed identically -- and neither was the model's to
+    // fix. Real credentials and real variable values always win; this only fills genuine gaps.
+    const inputs = planInputs(resolvedDir);
+    const planEnv = inputs.scanOnly ? { ...process.env, ...inputs.env } : undefined;
+    // Only when we supplied the credentials ourselves: a machine with a real account plans against
+    // it, unmodified. The override is removed in `finally` so a throw between here and there
+    // cannot leave a provider-weakening file behind in someone's repository.
+    let plan;
+    try {
+      if (inputs.injectedCredentials) writeScanOverride(resolvedDir, inputs.providers);
+      plan = terraformPlan(resolvedDir, tmpPlanPath, varFileArg, planEnv);
+    } finally {
+      removeScanOverride(resolvedDir);
+    }
     if (plan.status !== 0 || !existsSync(tmpPlanPath)) {
       safeUnlink(tmpPlanPath);
       const output = (plan.stderr || plan.stdout || "").slice(0, 4000);
@@ -264,6 +281,41 @@ server.tool(
         removedSinceLastScan: removed,
       };
       return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], isError: true };
+    }
+
+    // A plan built on synthesized inputs is a scan result, not something to apply. Terraform
+    // writes variable values INTO the plan file -- unlike credentials, which the provider
+    // re-resolves at apply time -- so applying this one would deploy a database whose password is
+    // literally "tfguard-scan-placeholder-01". No planId is issued, which leaves the plan->apply
+    // chokepoint exactly as strict as it was while letting every rule finally run.
+    if (inputs.scanOnly) {
+      safeUnlink(tmpPlanPath);
+      const supplied = [
+        inputs.injectedVariables.length
+          ? `values for ${inputs.injectedVariables.length} variable(s) with no value of their own ` +
+            `(${inputs.injectedVariables.join(", ")})`
+          : null,
+        inputs.injectedCredentials ? "placeholder cloud credentials" : null,
+      ].filter(Boolean);
+      const report = {
+        ok: true,
+        planId: null,
+        applyable: false,
+        planScanned: true,
+        workingDir: resolvedDir,
+        resourceSummary,
+        resourcesScanned: resourceChanges.length,
+        removedSinceLastScan: removed,
+        scanOnlyInputs: { variables: inputs.injectedVariables, credentials: inputs.injectedCredentials },
+        message:
+          `Scanned clean: 0 violations across ${resourceChanges.length} resource change(s). ` +
+          `Every plan-based rule ran.\n\nNo planId was issued, because this plan was only ` +
+          `possible after supplying ${supplied.join(" and ")}. Terraform stores variable values in ` +
+          `the plan file, so applying this one would deploy those placeholders. To get an ` +
+          `applyable plan, give the variables real values (terraform.tfvars, *.auto.tfvars, or ` +
+          `TF_VAR_*) and make real credentials available, then plan again.` + regressionWarning,
+      };
+      return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }] };
     }
 
     const meta = storePlan({ planFilePath: tmpPlanPath, workingDir: resolvedDir, resourceSummary });
