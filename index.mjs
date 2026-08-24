@@ -208,10 +208,24 @@ server.tool(
       const findingsText = sourceFindings.length
         ? `\n\nThe source scan DID find ${sourceFindings.length} issue(s):\n${formatRefusalMessage(sourceFindings)}`
         : `\n\nThe source scan found no issues in the patterns it can check without a plan.`;
-      return {
-        content: [{ type: "text", text: `${preamble}${findingsText}\n\n${output}${regressionWarning}` }],
-        isError: true,
+      // Structured, like the other two exit paths, and for a specific reason: the caller used to
+      // have to decide from prose whether this was "the plan could not run" or "the plan found
+      // something", and the only available signal was a regex over the whole blob. A source-scan
+      // finding whose text contains the word "credential" -- which every credential finding does --
+      // was therefore classified as an authentication failure and demoted to advisory. A
+      // hardcoded credential shipped that way in a real run while validation reported PASSED.
+      // `planScanned` and `violations` answer both questions without reading the message.
+      const report = {
+        ok: false,
+        workingDir: resolvedDir,
+        planScanned: false,
+        unscannableReason: looksLikeCredentials ? "provider-authentication" : "plan-failed",
+        violationCount: sourceFindings.length,
+        worstSeverity: sourceFindings.length ? worstSeverity(sourceFindings) : null,
+        violations: sourceFindings,
+        message: `${preamble}${findingsText}\n\n${output}${regressionWarning}`,
       };
+      return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], isError: true };
     }
 
     let planJson;
@@ -242,6 +256,7 @@ server.tool(
       const report = {
         ok: false,
         workingDir: resolvedDir,
+        planScanned: true,
         violationCount: violations.length,
         worstSeverity: worstSeverity(violations),
         message: formatRefusalMessage(violations) + regressionWarning,
@@ -258,6 +273,7 @@ server.tool(
       ok: true,
       planId: meta.planId,
       workingDir: resolvedDir,
+      planScanned: true,
       expiresAt: meta.expiresAt,
       resourceSummary,
       resourcesScanned: resourceChanges.length,
