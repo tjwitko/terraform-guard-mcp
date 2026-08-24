@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { scanTerraformSources } from "../lib/source-scan.mjs";
@@ -336,4 +336,42 @@ variable "no_pw"    { default = "postgresql://reader@db.internal/app" }
 variable "interp"   { default = "postgresql://u:\${var.pw}@db/app" } // identity-guard:allow test material; gitleaks:allow
 `);
   assert.deepEqual(found, []);
+});
+
+// Child modules live in subdirectories and this walk did not enter them, so a literal credential in
+// modules/db/main.tf was invisible to every rule in this file. Not a corner case: child modules are
+// the layout Terraform documents, and the one this repo's own IaC benchmark fixture teaches.
+test("descends into child modules, and names the file it found", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tfguard-scan-"));
+  mkdirSync(path.join(dir, "modules", "db"), { recursive: true });
+  writeFileSync(path.join(dir, "main.tf"), 'module "db" { source = "./modules/db" }\n');
+  writeFileSync(
+    path.join(dir, "modules", "db", "main.tf"),
+    'resource "aws_db_instance" "d" {\n  password = "SubmoduleSecret123!"\n}\n' // gitleaks:allow
+  );
+  try {
+    const found = scanTerraformSources(dir);
+    assert.deepEqual(ids(found), ["resource.hardcoded-credentials"]);
+    assert.match(found[0].resourceAddress, /modules\/db\/main\.tf/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Reporting a credential inside a module Terraform downloaded is noise the caller cannot act on,
+// and this project has watched a model rewrite its own working files chasing errors that lived in
+// vendored code. Same reason the Checkov integration drops vendored findings.
+test("does not descend into .terraform, where downloaded modules live", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tfguard-scan-"));
+  mkdirSync(path.join(dir, ".terraform", "modules", "vendored"), { recursive: true });
+  writeFileSync(path.join(dir, "main.tf"), 'resource "aws_s3_bucket" "b" { bucket = "x" }\n');
+  writeFileSync(
+    path.join(dir, ".terraform", "modules", "vendored", "main.tf"),
+    'resource "aws_db_instance" "v" {\n  password = "VendoredThirdPartySecret!"\n}\n' // gitleaks:allow
+  );
+  try {
+    assert.deepEqual(scanTerraformSources(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
