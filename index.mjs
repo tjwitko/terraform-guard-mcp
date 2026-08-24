@@ -326,6 +326,9 @@ server.tool(
       planId: meta.planId,
       workingDir: resolvedDir,
       planScanned: true,
+      // Stated explicitly rather than left undefined: the scan-only path sets applyable:false, and
+      // a consumer writing `if (!report.applyable)` would otherwise reject every real plan.
+      applyable: true,
       expiresAt: meta.expiresAt,
       resourceSummary,
       resourcesScanned: resourceChanges.length,
