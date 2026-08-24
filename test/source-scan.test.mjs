@@ -257,3 +257,50 @@ provider "aws" {
 `);
   assert.deepEqual(found, []);
 });
+
+// The most obvious form of this defect, and the one place this scanner did not look. A generated
+// project wrote `password = "SecurePassword123!"` straight into an aws_db_instance: the
+// provider-block rule reads provider blocks, the variable rule reads variable blocks, the tfvars
+// rule reads .tfvars, and a literal master password in the resource itself fell between all three
+// while the gate reported zero findings.
+test("catches a literal credential on a resource, across providers", () => {
+  const found = withTf(`
+resource "aws_db_instance" "log_db" {
+  username = "log_admin"
+  password = "SecurePassword123!"
+}
+resource "azurerm_mssql_server" "sql" {
+  administrator_login_password = "P@ssw0rd2024"
+}
+`);
+  assert.deepEqual(ids(found), ["resource.hardcoded-credentials", "resource.hardcoded-credentials"]);
+  assert.deepEqual(found.map((f) => f.attribute).sort(), ["administrator_login_password", "password"]);
+  assert.deepEqual(found.map((f) => f.actualValue), ["<redacted>", "<redacted>"]);
+});
+
+test("a resource credential sourced from a variable is not a literal", () => {
+  const found = withTf(`
+resource "aws_db_instance" "ok" {
+  password = var.db_password
+}
+resource "aws_rds_cluster" "also_ok" {
+  master_password = "\${var.pw}"
+}
+`);
+  assert.deepEqual(found, []);
+});
+
+// This rule reads every resource in the configuration, so a name merely containing "password" must
+// not fire. A scanner that flags aws_iam_account_password_policy produces findings nobody trusts.
+test("does not flag password settings that hold no secret", () => {
+  const found = withTf(`
+resource "aws_iam_account_password_policy" "strict" {
+  minimum_password_length   = 14
+  password_reuse_prevention = 5
+}
+resource "aws_cognito_user_pool" "p" {
+  password_policy { minimum_length = 12 }
+}
+`);
+  assert.deepEqual(found, []);
+});
