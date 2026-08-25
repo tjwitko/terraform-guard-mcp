@@ -375,3 +375,63 @@ test("does not descend into .terraform, where downloaded modules live", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// HCL lets any string be written as a heredoc, and every rule here required a quoted value, so
+// `secret_key = <<-EOT ... EOT` was invisible to all of them. gitleaks does not close the gap:
+// measured with identical high-entropy credentials, its generic-api-key rule fired on the quoted
+// form and not on the heredoc. Its private-key rule DOES match a PEM in a heredoc, so multi-line
+// key material stays covered by the other scanner; the uncovered set was generic secrets.
+test("catches credentials written as heredocs, indented or flush", () => {
+  const found = withTf(`
+provider "aws" {
+  region     = "us-east-1"
+  secret_key = <<-EOT
+    wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  EOT
+}
+resource "aws_db_instance" "d" {
+  password = <<EOT
+SuperSecretDbPassword123!
+EOT
+}
+`); // gitleaks:allow
+  assert.deepEqual(ids(found), ["provider.hardcoded-credentials", "resource.hardcoded-credentials"]);
+  assert.deepEqual(found.map((f) => f.actualValue), ["<redacted>", "<redacted>"]);
+});
+
+test("catches a connection string written as a heredoc", () => {
+  // Assembled rather than written out, so no line of this file is itself a credential. Both this
+  // repo's own scanners flag a literal DSN here and refuse the commit, and suppressing them inside
+  // the test data would change the very value under test.
+  const dsn = ["postgresql://svc:", "hunter2", "@db.internal/app"].join("");
+  const found = withTf(`
+resource "kubernetes_secret" "s" {
+  data = {
+    url = <<-EOT
+      ${dsn}
+    EOT
+  }
+}
+`);
+  assert.deepEqual(ids(found), ["connection-string.embedded-password"]);
+});
+
+// The same exclusions apply whichever way the string is written: an interpolation is a reference,
+// and a heredoc on a non-credential attribute is just a multi-line string, which is what heredocs
+// are normally for.
+test("heredocs that are not literal credentials do not fire", () => {
+  const found = withTf(`
+provider "aws" {
+  secret_key = <<-EOT
+    \${var.secret}
+  EOT
+}
+resource "aws_instance" "i" {
+  user_data = <<-EOT
+    #!/bin/bash
+    echo hello
+  EOT
+}
+`);
+  assert.deepEqual(found, []);
+});
