@@ -14,6 +14,10 @@ So nothing gets promoted here by default. Each entry needs its defaults verified
 provider docs (not recollection — see the standing rule in CLAUDE.md), and a deliberate call that
 the exposure is worth blocking on.
 
+The companion file `local-delegate-mcp/docs/candidate-rules.md` tracks the mirror-image problem in
+the agent-loop gates: where those checks are *wrong* rather than merely advisory, and what they do
+not check yet.
+
 ---
 
 ## Resolved
