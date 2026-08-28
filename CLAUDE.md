@@ -244,3 +244,18 @@ before any real API call happens.
   integration surface, no engine changes needed — but no attribute defaults for either cloud have
   been verified against real docs yet. Don't write GCP/Azure rules from memory; verify each one
   the same way the AWS pack's defaults were verified (real provider doc fetch, not recollection).
+- **An EKS control plane is open to the internet unless two separate attributes say otherwise.**
+  Verified against terraform-provider-aws's own docs: `endpoint_public_access` is "Default is
+  `true`" and of `public_access_cidrs` they say "EKS defaults this to a list with `0.0.0.0/0`".
+  So a `vpc_config` block that sets only `subnet_ids` — the shape every generated config in the
+  benchmark produced, 6 clusters out of 6 — is a Kubernetes API server reachable from anywhere,
+  with nothing in the source text to notice. Two consequences for rule-writing here: test
+  `endpoint_public_access === false` rather than falsiness, since `undefined` is the *unsafe*
+  case; and read `public_access_cidrs` out of `after_unknown`, because it is Optional+Computed and
+  never appears in `after` at all when unset (confirmed on a real `terraform show -json`, after a
+  first draft that only handled the null-in-`after` branch that real plans never take).
+- **Advisory-only findings that arguably belong in the blocking pack are tracked in
+  `docs/candidate-rules.md`.** Three are open there. Nothing is promoted without verifying the
+  attribute's real default first — the same discipline that dropped the originally-planned 8th S3
+  rule — because a false positive in a blocking gate destroys work rather than merely missing a
+  finding.

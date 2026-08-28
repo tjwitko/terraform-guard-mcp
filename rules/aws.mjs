@@ -1,6 +1,6 @@
 import { makeViolation } from "./engine.mjs";
 
-// AWS rule pack — 9 rules. (Seeded with 7, not the 8 originally planned; The 8th (flag S3 buckets with no
+// AWS rule pack — 14 rules. (Seeded with 7, not the 8 originally planned; The 8th (flag S3 buckets with no
 // aws_s3_bucket_server_side_encryption_configuration) was dropped after checking the real
 // provider docs at implementation time: AWS applies default SSE-S3 encryption to every new
 // bucket automatically since 2023, with or without this resource declared (confirmed via
@@ -597,6 +597,88 @@ const rules = [
           actualValue: g.what,
         })
       );
+    },
+  },
+  {
+    id: "aws.kubernetes.eks-public-api-open",
+    category: "kubernetes.public-api",
+    severity: "critical",
+    provider: "aws",
+    kind: "single",
+    resourceTypes: ["aws_eks_cluster"],
+    description:
+      "Flags an EKS cluster whose Kubernetes API server endpoint is reachable from 0.0.0.0/0. " +
+      "This is the same exposure aws.network.sg-open-ingress-sensitive-port already blocks on, " +
+      "arriving through a different resource type: an open control plane is an open control plane " +
+      "whether the 0.0.0.0/0 is written into a security group or inherited from EKS's defaults. " +
+      "Both relevant attributes default to the unsafe value — verified against " +
+      "terraform-provider-aws's own docs rather than recalled. endpoint_public_access is " +
+      '"Default is `true`", and of public_access_cidrs the docs say "EKS defaults this to a list ' +
+      'with `0.0.0.0/0`". A vpc_config that sets neither is therefore a control plane open to the ' +
+      "entire internet with nothing in the source text to notice — which is the exact shape every " +
+      "EKS cluster in this project's benchmark deliverables produced.",
+    check(resource) {
+      const after = resource.change.after || {};
+      // vpc_config is a MaxItems:1 block, so a plan represents it as a one-element list. The
+      // object form is accepted too rather than assumed away: a rule that silently matches
+      // nothing because of a shape mismatch is the failure mode this pack keeps having to fix.
+      const rawVpc = after.vpc_config;
+      const vpc = (Array.isArray(rawVpc) ? rawVpc[0] : rawVpc) || {};
+
+      // Absent means the provider default, which is true. Only an explicit false closes the
+      // endpoint, so `=== false` is the test — not a falsy check, which would also swallow
+      // undefined and turn the unsafe default into a silent pass.
+      if (vpc.endpoint_public_access === false) return [];
+
+      const exposure =
+        vpc.endpoint_public_access === true
+          ? "endpoint_public_access = true"
+          : "endpoint_public_access is unset (provider default: true)";
+
+      const cidrs = vpc.public_access_cidrs;
+
+      if (Array.isArray(cidrs) && cidrs.length > 0) {
+        if (!cidrs.includes("0.0.0.0/0")) return []; // genuinely restricted to named ranges
+        return [
+          makeViolation(rules[13], resource, {
+            message: `${exposure} and public_access_cidrs contains 0.0.0.0/0 — the Kubernetes API server is reachable from the entire internet`,
+            remediation:
+              "restrict public_access_cidrs to the ranges that actually need API access, or set " +
+              "endpoint_public_access = false and reach the API through the VPC with " +
+              "endpoint_private_access = true",
+            attribute: "vpc_config.public_access_cidrs",
+            actualValue: cidrs,
+          }),
+        ];
+      }
+
+      // public_access_cidrs is Optional+Computed, so an unset value lands in after_unknown rather
+      // than as a null in `after` — confirmed against a real `terraform show -json` of a generated
+      // config, where `after.vpc_config[0]` carried endpoint_public_access:true (the provider
+      // materialising its own default) while public_access_cidrs appeared only under
+      // after_unknown. That makes THIS the branch real plans take, not the null branch above.
+      // Unknown is treated the way the security-group rule treats an unresolved port range —
+      // conservatively — since the two reasons it can be unknown (unset, so EKS computes its
+      // 0.0.0.0/0 default; or set from a value not yet known) both warrant flagging.
+      const rawUnknown = resource.change.after_unknown;
+      const unknownVpc =
+        (Array.isArray(rawUnknown?.vpc_config) ? rawUnknown.vpc_config[0] : rawUnknown?.vpc_config) || {};
+      const cidrsUnknown =
+        unknownVpc.public_access_cidrs === true || Array.isArray(unknownVpc.public_access_cidrs);
+
+      return [
+        makeViolation(rules[13], resource, {
+          message: cidrsUnknown
+            ? `${exposure} and public_access_cidrs is not set in configuration (it resolves to EKS's computed default of 0.0.0.0/0) or resolves to a value unknown at plan time — either way this cluster cannot be shown to be restricted`
+            : `${exposure} and no public_access_cidrs is set, so EKS applies its default of 0.0.0.0/0 — the Kubernetes API server is reachable from the entire internet`,
+          remediation:
+            "set public_access_cidrs to the ranges that actually need API access, or set " +
+            "endpoint_public_access = false and reach the API through the VPC with " +
+            "endpoint_private_access = true",
+          attribute: "vpc_config.public_access_cidrs",
+          actualValue: cidrsUnknown ? "(unknown at plan time)" : null,
+        }),
+      ];
     },
   },
 ];

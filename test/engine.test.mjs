@@ -845,3 +845,90 @@ test("tfvars: empty and interpolated values are not literals", () => {
   assert.deepEqual(scanTfvarsAssignments('db_password = ""', "t.tfvars"), []);
   assert.deepEqual(scanTfvarsAssignments('db_password = "${var.x}"', "t.tfvars"), []);
 });
+
+// --- aws.kubernetes.eks-public-api-open -------------------------------------------------------
+// Both attributes this rule reads default to the UNSAFE value, so the "attribute absent" cases
+// below are the ones that matter most: they are the shape real generated configs produce.
+
+function eksCluster({ vpc_config, after_unknown } = {}) {
+  return resource({
+    address: "aws_eks_cluster.main",
+    type: "aws_eks_cluster",
+    after: { name: "c", ...(vpc_config === undefined ? {} : { vpc_config }) },
+    after_unknown,
+  });
+}
+
+const EKS_OPEN = "aws.kubernetes.eks-public-api-open";
+
+test("eks-public-api-open: flags a vpc_config that sets neither attribute (both defaults unsafe)", () => {
+  const violations = evaluate(planOf(eksCluster({ vpc_config: [{ subnet_ids: ["subnet-1"] }] })), PROVIDER_PACKS);
+  assert.deepEqual(ruleIds(violations), [EKS_OPEN]);
+  assert.match(violations[0].message, /unset \(provider default: true\)/);
+  assert.match(violations[0].message, /default of 0\.0\.0\.0\/0/);
+});
+
+test("eks-public-api-open: flags endpoint_public_access = true with no cidr restriction", () => {
+  const violations = evaluate(
+    planOf(eksCluster({ vpc_config: [{ endpoint_public_access: true, endpoint_private_access: true }] })),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(ruleIds(violations), [EKS_OPEN]);
+  assert.match(violations[0].message, /endpoint_public_access = true/);
+});
+
+test("eks-public-api-open: flags an explicit 0.0.0.0/0 in public_access_cidrs", () => {
+  const violations = evaluate(
+    planOf(eksCluster({ vpc_config: [{ endpoint_public_access: true, public_access_cidrs: ["10.0.0.0/8", "0.0.0.0/0"] }] })),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(ruleIds(violations), [EKS_OPEN]);
+  assert.deepEqual(violations[0].actualValue, ["10.0.0.0/8", "0.0.0.0/0"]);
+});
+
+test("eks-public-api-open: endpoint_public_access = false is clean regardless of cidrs", () => {
+  const violations = evaluate(
+    planOf(eksCluster({ vpc_config: [{ endpoint_public_access: false, endpoint_private_access: true }] })),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(ruleIds(violations), []);
+});
+
+test("eks-public-api-open: a real cidr allowlist is clean", () => {
+  const violations = evaluate(
+    planOf(eksCluster({ vpc_config: [{ endpoint_public_access: true, public_access_cidrs: ["203.0.113.0/24"] }] })),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(ruleIds(violations), []);
+});
+
+test("eks-public-api-open: unresolvable public_access_cidrs is reported as unresolvable, not as the default", () => {
+  const violations = evaluate(
+    planOf(
+      eksCluster({
+        vpc_config: [{ endpoint_public_access: true }],
+        after_unknown: { vpc_config: [{ public_access_cidrs: true }] },
+      })
+    ),
+    PROVIDER_PACKS
+  );
+  assert.deepEqual(ruleIds(violations), [EKS_OPEN]);
+  assert.match(violations[0].message, /unknown at plan time/);
+  assert.equal(violations[0].actualValue, "(unknown at plan time)");
+});
+
+test("eks-public-api-open: accepts the object form of vpc_config, not only the one-element list", () => {
+  const violations = evaluate(planOf(eksCluster({ vpc_config: { subnet_ids: ["subnet-1"] } })), PROVIDER_PACKS);
+  assert.deepEqual(ruleIds(violations), [EKS_OPEN]);
+});
+
+test("eks-public-api-open: a cluster with no vpc_config at all still flags (defaults still apply)", () => {
+  const violations = evaluate(planOf(eksCluster()), PROVIDER_PACKS);
+  assert.deepEqual(ruleIds(violations), [EKS_OPEN]);
+});
+
+test("eks-public-api-open: a cluster being destroyed is not flagged", () => {
+  const r = eksCluster({ vpc_config: [{ subnet_ids: ["subnet-1"] }] });
+  r.change.actions = ["delete"];
+  assert.deepEqual(ruleIds(evaluate(planOf(r), PROVIDER_PACKS)), []);
+});
