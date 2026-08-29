@@ -95,6 +95,42 @@ function findPolicyWildcard(doc) {
   return null;
 }
 
+// Both constants below name an attribute that lives inside a nested block. Naming the attribute
+// without naming the block is what cost a benchmark run on the EKS rule: the settings were written
+// at the top level of the resource, where they are not valid arguments, and the run spent its
+// remaining turns failing `terraform validate`. Auditing the pack afterwards found the same
+// omission in these two.
+//
+// The object-lock one had ALREADY cost a run, unnoticed. A generated config wrote
+// `mode = "COMPLIANCE"` directly under aws_s3_bucket_object_lock_configuration and took three
+// turns to recover. That was recorded at the time as the model's own nesting mistake; it was this
+// message's.
+const SG_INLINE_REMEDIATION =
+  "cidr_blocks and ipv6_cidr_blocks live INSIDE the ingress block they belong to, not at the top " +
+  "level of aws_security_group:\n" +
+  "  ingress {\n" +
+  "    from_port   = 443\n" +
+  "    to_port     = 443\n" +
+  '    protocol    = "tcp"\n' +
+  '    cidr_blocks = ["10.0.0.0/16"]  # a known range, not 0.0.0.0/0\n' +
+  "  }\n" +
+  "or remove the rule if it is not needed. On the newer aws_vpc_security_group_ingress_rule " +
+  "resource these are top-level cidr_ipv4/cidr_ipv6 instead.";
+
+const OBJECT_LOCK_MODE_REMEDIATION =
+  "mode sits two blocks deep, inside rule { default_retention { ... } } -- not directly under " +
+  "aws_s3_bucket_object_lock_configuration, where it is not a valid argument:\n" +
+  "  rule {\n" +
+  "    default_retention {\n" +
+  '      mode = "COMPLIANCE"\n' +
+  "      days = 2555\n" +
+  "    }\n" +
+  "  }\n" +
+  "Prefer COMPLIANCE over GOVERNANCE for an audit trail: GOVERNANCE retention can be lifted by any " +
+  "principal holding s3:BypassGovernanceRetention, so it protects against accident rather than " +
+  "against intent. COMPLIANCE cannot be overridden by anyone, including the account root, until " +
+  "the period expires.";
+
 // EVERY one of these settings lives INSIDE the vpc_config block, and the remediation says so with
 // a snippet rather than in prose. An earlier version named the attributes without naming the block;
 // a generated config then placed both at the top level of the resource, which is not a valid
@@ -187,7 +223,7 @@ const rules = [
                   (coversEverything(block.protocol)
                     ? `every port and every protocol`
                     : `port ${block.from_port}-${block.to_port}`),
-                remediation: "restrict cidr_blocks/ipv6_cidr_blocks to a known range, or remove the rule if unneeded",
+                remediation: SG_INLINE_REMEDIATION,
                 attribute: `ingress[${i}]`,
                 actualValue: openV4 ? block.cidr_blocks : block.ipv6_cidr_blocks,
               })
@@ -534,11 +570,7 @@ const rules = [
           message:
             `sets a retention period (${retention.days ?? retention.years} ` +
             `${retention.days != null ? "days" : "years"}) with no mode`,
-          remediation:
-            'set mode = "COMPLIANCE". Prefer it over GOVERNANCE for an audit trail: GOVERNANCE ' +
-            "retention can be lifted by any principal holding s3:BypassGovernanceRetention, so it " +
-            "protects against accident rather than against intent. COMPLIANCE cannot be overridden " +
-            "by anyone, including the account root, until the period expires.",
+          remediation: OBJECT_LOCK_MODE_REMEDIATION,
           attribute: "rule.default_retention.mode",
           actualValue: null,
         }),

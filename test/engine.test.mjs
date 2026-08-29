@@ -945,3 +945,64 @@ test("eks-public-api-open: the remediation names vpc_config and shows the placem
   assert.match(r, /vpc_config \{[\s\S]*endpoint_public_access\s+= false/);
   assert.match(r, /vpc_config \{[\s\S]*public_access_cidrs/);
 });
+
+// --- remediation placement audit -----------------------------------------------------------------
+// An attribute that lives inside a nested block must be remediated WITH its block. Naming the
+// attribute alone cost one run on the EKS rule and, unnoticed at the time, an earlier one on the
+// object-lock rule — a generated config wrote `mode = "COMPLIANCE"` directly under the
+// configuration resource and spent three turns recovering.
+
+test("sg-open-ingress: the remediation shows cidr_blocks inside an ingress block", () => {
+  const plan = planOf(
+    resource({
+      address: "aws_security_group.web",
+      type: "aws_security_group",
+      after: { ingress: [{ from_port: 22, to_port: 22, protocol: "tcp", cidr_blocks: ["0.0.0.0/0"] }] },
+    })
+  );
+  const r = evaluate(plan, PROVIDER_PACKS).find((v) => v.ruleId.endsWith("sg-open-ingress-sensitive-port")).remediation;
+  assert.match(r, /INSIDE the ingress block/);
+  assert.match(r, /not at the top level of aws_security_group/);
+  assert.match(r, /ingress \{[\s\S]*cidr_blocks/);
+  // and it must not mislead the other resource shape, where these ARE top level
+  assert.match(r, /aws_vpc_security_group_ingress_rule[\s\S]*top-level cidr_ipv4/);
+});
+
+test("object-lock-retention-mode: the remediation shows mode two blocks deep", () => {
+  const plan = planOf(
+    resource({
+      address: "aws_s3_bucket_object_lock_configuration.this",
+      type: "aws_s3_bucket_object_lock_configuration",
+      after: { bucket: "b", rule: [{ default_retention: [{ days: 30 }] }] },
+    })
+  );
+  const v = evaluate(plan, PROVIDER_PACKS).filter((x) => x.ruleId.endsWith("s3-object-lock-retention-mode-missing"));
+  assert.equal(v.length, 1);
+  assert.match(v[0].remediation, /two blocks deep/);
+  assert.match(v[0].remediation, /rule \{[\s\S]*default_retention \{[\s\S]*mode = "COMPLIANCE"/);
+  assert.match(v[0].remediation, /not directly under aws_s3_bucket_object_lock_configuration/);
+});
+
+// The audit itself, kept as a test: every remediation that names an attribute known to live in a
+// nested block must also name the block. A new rule that forgets this fails here rather than in a
+// benchmark run four hours later.
+test("no remediation names a nested-block attribute without naming its block", () => {
+  const NESTED = {
+    cidr_blocks: "ingress",
+    ipv6_cidr_blocks: "ingress",
+    http_tokens: "metadata_options",
+    endpoint_public_access: "vpc_config",
+    endpoint_private_access: "vpc_config",
+    public_access_cidrs: "vpc_config",
+  };
+  const offenders = [];
+  for (const rule of PROVIDER_PACKS.aws) {
+    const texts = [rule.description];
+    for (const [attr, block] of Object.entries(NESTED)) {
+      for (const t of texts.filter(Boolean)) {
+        if (t.includes(`${attr} =`) && !t.includes(block)) offenders.push(`${rule.id}: ${attr} without ${block}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, []);
+});
