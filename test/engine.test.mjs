@@ -932,3 +932,16 @@ test("eks-public-api-open: a cluster being destroyed is not flagged", () => {
   r.change.actions = ["delete"];
   assert.deepEqual(ruleIds(evaluate(planOf(r), PROVIDER_PACKS)), []);
 });
+
+// The remediation is part of the finding, and a wrong one costs a run. webhook-7 read
+// "set endpoint_public_access = false" and put it at the top level of the resource, where it is
+// not a valid argument; it then spent its remaining turns failing terraform validate. The
+// remediation must name the block that holds these settings, not just the settings.
+test("eks-public-api-open: the remediation names vpc_config and shows the placement", () => {
+  const violations = evaluate(planOf(eksCluster({ vpc_config: [{ subnet_ids: ["s-1"] }] })), PROVIDER_PACKS);
+  const r = violations[0].remediation;
+  assert.match(r, /INSIDE the resource's vpc_config block/);
+  assert.match(r, /not at the top level/);
+  assert.match(r, /vpc_config \{[\s\S]*endpoint_public_access\s+= false/);
+  assert.match(r, /vpc_config \{[\s\S]*public_access_cidrs/);
+});

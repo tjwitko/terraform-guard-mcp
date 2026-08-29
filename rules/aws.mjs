@@ -95,6 +95,27 @@ function findPolicyWildcard(doc) {
   return null;
 }
 
+// EVERY one of these settings lives INSIDE the vpc_config block, and the remediation says so with
+// a snippet rather than in prose. An earlier version named the attributes without naming the block;
+// a generated config then placed both at the top level of the resource, which is not a valid
+// argument there, and the run spent its remaining turns failing `terraform validate` instead of
+// fixing anything. A gate that reports the defect correctly and then misdirects the fix has not
+// helped -- and this rule's own message was the misdirection.
+const REMEDIATION =
+  "these settings all live INSIDE the resource's vpc_config block, not at the top level of the " +
+  "resource. Either restrict the CIDRs:\n" +
+  "  vpc_config {\n" +
+  "    subnet_ids          = [...]\n" +
+  '    public_access_cidrs = ["203.0.113.0/24"]  # the ranges that actually need API access\n' +
+  "  }\n" +
+  "or close the public endpoint and reach the API through the VPC:\n" +
+  "  vpc_config {\n" +
+  "    subnet_ids              = [...]\n" +
+  "    endpoint_public_access  = false\n" +
+  "    endpoint_private_access = true\n" +
+  "  }";
+
+
 const rules = [
   {
     id: "aws.storage.s3-public-access-block-missing",
@@ -642,10 +663,7 @@ const rules = [
         return [
           makeViolation(rules[13], resource, {
             message: `${exposure} and public_access_cidrs contains 0.0.0.0/0 — the Kubernetes API server is reachable from the entire internet`,
-            remediation:
-              "restrict public_access_cidrs to the ranges that actually need API access, or set " +
-              "endpoint_public_access = false and reach the API through the VPC with " +
-              "endpoint_private_access = true",
+            remediation: REMEDIATION,
             attribute: "vpc_config.public_access_cidrs",
             actualValue: cidrs,
           }),
@@ -671,10 +689,7 @@ const rules = [
           message: cidrsUnknown
             ? `${exposure} and public_access_cidrs is not set in configuration (it resolves to EKS's computed default of 0.0.0.0/0) or resolves to a value unknown at plan time — either way this cluster cannot be shown to be restricted`
             : `${exposure} and no public_access_cidrs is set, so EKS applies its default of 0.0.0.0/0 — the Kubernetes API server is reachable from the entire internet`,
-          remediation:
-            "set public_access_cidrs to the ranges that actually need API access, or set " +
-            "endpoint_public_access = false and reach the API through the VPC with " +
-            "endpoint_private_access = true",
+          remediation: REMEDIATION,
           attribute: "vpc_config.public_access_cidrs",
           actualValue: cidrsUnknown ? "(unknown at plan time)" : null,
         }),
