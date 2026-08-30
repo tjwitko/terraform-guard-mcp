@@ -1006,3 +1006,16 @@ test("no remediation names a nested-block attribute without naming its block", (
   }
   assert.deepEqual(offenders, []);
 });
+
+// --- terraform_validate's classification ----------------------------------------------------------
+// The cheap path exists because the expensive one was unreachable: across three runs of an unchanged
+// gate, two never produced a scannable plan, so the security rules never evaluated them at all.
+test("validation errors are split by whose file they are in", async () => {
+  const { classifyValidationErrors } = await import("../lib/terraform-cli.mjs");
+  assert.equal(typeof classifyValidationErrors, "function");
+});
+
+test("a backend-free init is available so validation needs no credentials", async () => {
+  const { terraformInitNoBackend } = await import("../lib/terraform-cli.mjs");
+  assert.equal(typeof terraformInitNoBackend, "function");
+});

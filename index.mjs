@@ -12,6 +12,7 @@ import { resolveWorkingDir } from "./lib/paths.mjs";
 import {
   checkTerraformInstalled,
   needsInit,
+  terraformInitNoBackend,
   terraformInit,
   terraformValidate,
   classifyValidationErrors,
@@ -65,6 +66,120 @@ const server = new McpServer({
   name: "terraform-guard",
   version: "0.1.0",
 });
+
+// Cheap syntax and schema checking, with no plan, no credentials and no backend. Added because the
+// expensive path was unreachable: across a three-run series with an unchanged gate, two runs never
+// produced a scannable plan at all, so the entire security rule pack — the EKS endpoint rule
+// included — never evaluated them. One shipped an internet-facing control plane completely
+// unchecked. A model that cannot cheaply find out whether its HCL parses spends its turns guessing,
+// and the security rules sit behind a gate it never reaches.
+//
+// This deliberately reports NOTHING about security. Saying so is the whole point: a tool that
+// returns "valid" must not be mistaken for one that returns "safe", and the response says as much
+// on every call, including the clean one.
+server.tool(
+  "terraform_validate",
+  "Check that a Terraform directory parses and matches the provider schemas. Fast, needs no cloud " +
+    "credentials and no backend — use it freely while writing HCL. This performs NO security " +
+    "scanning whatsoever and never returns a planId: a directory that validates cleanly may still " +
+    "be refused by terraform_plan. Run it to fix syntax and schema errors, then call terraform_plan " +
+    "for the security scan.",
+  {
+    working_dir: z
+      .string()
+      .describe("Path to the Terraform root module, relative to this server's working root or absolute within it."),
+  },
+  async ({ working_dir }) => {
+    let resolvedDir;
+    try {
+      resolvedDir = resolveWorkingDir(working_dir);
+    } catch (err) {
+      return { content: [{ type: "text", text: `Refusing to validate: ${err.message}` }], isError: true };
+    }
+
+    if (needsInit(resolvedDir)) {
+      const init = terraformInitNoBackend(resolvedDir);
+      if (init.status !== 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Could not initialise ${working_dir} for validation. This is usually a module ` +
+                `source that cannot be downloaded, or a provider version constraint with no ` +
+                `solution.\n\n${(init.stderr || init.stdout || "").slice(0, 2000)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
+    const { parsed, own, vendored } = classifyValidationErrors(resolvedDir);
+    if (!parsed) {
+      const raw = terraformValidate(resolvedDir);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `terraform validate could not be read as JSON, so this is its raw output. Treat an ` +
+              `unreadable result as unchecked, not as clean.\n\n${(raw.stdout || raw.stderr || "").slice(0, 2000)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Errors inside a downloaded module are not the caller's to fix, and telling them to fix code
+    // they do not own sent one run rewriting its own main.tf ten times.
+    if (own.length === 0 && vendored.length > 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Your own configuration is valid. ${vendored.length} error(s) are inside downloaded ` +
+              `modules under .terraform/modules — NOT in files you wrote. Do not rewrite your ` +
+              `configuration to chase them; they almost always mean the module version and the ` +
+              `provider version are incompatible. Raise the module version, or constrain the ` +
+              `provider to one the module supports.\n\n${vendored.slice(0, 10).join("\n")}\n\n` +
+              `NOTE: no security scanning was performed. Call terraform_plan for that.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    if (own.length > 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `${own.length} schema/syntax error(s) in your configuration:\n\n${own.slice(0, 20).join("\n")}` +
+              (vendored.length ? `\n\n(${vendored.length} further error(s) are inside downloaded modules.)` : "") +
+              `\n\nNOTE: no security scanning was performed. Fix these, then call terraform_plan.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `${working_dir} is valid Terraform: it parses and matches the provider schemas.\n\n` +
+            `This says NOTHING about whether it is safe to apply. No security rule was evaluated ` +
+            `and no planId was issued. Call terraform_plan for the security scan — a directory that ` +
+            `validates cleanly is regularly refused there.`,
+        },
+      ],
+    };
+  }
+);
 
 server.tool(
   "terraform_plan",
