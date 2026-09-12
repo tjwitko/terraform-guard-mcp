@@ -47,49 +47,131 @@ Evidence at the time of promotion — every `aws_eks_cluster` across the preserv
 
 ## Open
 
-The three below came from the same review that surfaced the EKS gap. None is promoted yet.
+None. The three entries below were worked on 12 September 2026 and all three were closed without
+promotion. Each was closed on verified provider behaviour rather than on judgement, and the evidence
+is recorded so that none of them gets re-opened from recollection.
 
-### 1. EKS control-plane logging disabled — category `kubernetes.control-plane-logging` (reserved)
+---
 
-`enabled_cluster_log_types` unset means no API/audit/authenticator logs reach CloudWatch, so
-control-plane activity is unreconstructable after the fact.
+## Closed without promotion
 
-- **Reserved in `rules/taxonomy.mjs`, no rule implements it.**
-- Deliverable evidence is mixed, which is what makes this worth measuring rather than assuming:
-  audit-adv18 sets all five log types unprompted; the other five clusters set none.
-- **Open question.** Absence-of-logging is a different argument from open-to-the-internet: it
-  degrades forensics rather than granting access. Blocking on it is defensible for a task whose
-  own requirement is a tamper-evident audit trail, and much less so as a universal rule.
-- **Verify before writing:** the real default for `enabled_cluster_log_types` when the attribute
-  is omitted, and whether an empty list and an absent attribute are distinguishable in plan JSON.
+### 1. EKS control-plane logging — closed: models already do it, and the task does not require it
 
-### 2. EKS secrets encryption not configured — category `kubernetes.secrets-encryption` (reserved)
+Verified against the provider docs, and the default is as suspected:
 
-No `encryption_config` block means Kubernetes Secrets are stored in etcd under the AWS-managed
-default rather than a customer-managed KMS key — no envelope encryption.
+> "By default, cluster control plane logs aren't sent to CloudWatch Logs. You must enable each log
+> type individually to send logs for your cluster."
+> — *Send control plane logs to CloudWatch Logs*, AWS EKS User Guide
 
-- **Reserved in `rules/taxonomy.mjs`, no rule implements it.**
-- **Open question.** Closer to the KMS-CMK entry below than to the EKS endpoint one: this is key
-  custody, not reachability.
-- **Verify before writing:** whether etcd is encrypted at rest by default with an AWS-managed key
-  when `encryption_config` is absent. If it is, "absent" is a custody preference, not an
-  unencrypted-secrets finding — and the rule's framing has to say so honestly. This is exactly the
-  check that killed the originally-planned 8th S3 rule (default SSE-S3 since 2023), so do it first.
+So absence really does mean no API/audit/authenticator record. The exposure is real. It is not worth
+a blocking rule here, for three reasons, in descending order of weight:
 
-### 3. No customer-managed KMS key on Secrets Manager / DynamoDB
+**The evidence in this file was stale and pointed the wrong way.** It recorded "audit-adv18 sets all
+five log types unprompted; the other five clusters set none." Across the webhook deliverables the
+distribution is the opposite:
 
-- **No taxonomy category reserved.** Would fit `storage.encryption` or `secrets.kms-policy`.
-- **Weakest of the three.** Both services encrypt at rest by default with AWS-managed keys, so the
-  finding is about who controls the key and can revoke access — a real concern for separation of
-  duties, but not the "reachable from the entire internet" risk class that made the EKS endpoint
-  clear-cut. Flagging every table and secret without a CMK would fire on ordinary configurations.
-- **If pursued,** scope it to resources the task itself designates as sensitive rather than
-  applying it universally — otherwise it is the S3-default-encryption false positive again.
+| deliverable | `enabled_cluster_log_types` |
+|---|---|
+| webhook-claude | all five |
+| webhook-sonnet-3 | all five |
+| webhook-haiku-4 | all five |
+| webhook-haiku-6 | all five |
+| webhook-haiku-9 | all five |
+| webhook-haiku-12 | **none** |
+
+5 of 6 comply without being asked. Compare the EKS endpoint rule that this file holds up as the
+worked example: 6 of 6 were internet-open and 6 of 6 passed clean. That rule changed behaviour
+because the behaviour was universally wrong. This one would codify a norm the models already follow
+and catch one deliverable in six.
+
+**The task's own requirement does not imply it.** The webhook task asks that a chargeback dispute
+weeks later "can be settled by what we actually received at the time" — a property of the *records*.
+Control-plane logging is a record of who changed the *cluster*. Related, not the same, and this file
+already says the promotion argument has to be verdict inconsistency rather than severity in the
+abstract. There is no inconsistency here: no other terraform-guard rule blocks on absent telemetry.
+
+**It is already detected.** Checkov reports `CKV_AWS_37` on exactly the one deliverable that lacks
+it. A blocking duplicate would add enforcement, not detection — and enforcement is the part the
+evidence above does not support.
+
+Reconsider if a task's stated requirement is control-plane forensics rather than record integrity.
+The taxonomy category stays reserved.
+
+### 2. EKS secrets encryption — closed: the exposure does not exist at these versions
+
+This is the entry the file warned to verify first, on the grounds that it was "exactly the check that
+killed the originally-planned 8th S3 rule". It died the same way.
+
+> "Amazon EKS provides default envelope encryption for all Kubernetes API data in EKS clusters
+> running Kubernetes version 1.28 or higher. […] By default, this KEK is owned by AWS, but you can
+> optionally bring your own from AWS KMS. […] you don't have to take any action."
+> — *Default envelope encryption for all Kubernetes API Data*, AWS EKS User Guide
+
+And, for clusters below that version:
+
+> "All of the data stored in the etcd are encrypted at the disk level for every EKS cluster,
+> irrespective of the Kubernetes version being run."
+
+So an absent `encryption_config` is not unencrypted secrets. It is an AWS-owned KEK instead of a
+customer-managed one — key custody, precisely as this entry suspected. The same page also records
+that the `resources` field of `EncryptionConfig` is **deprecated** and no longer affects what is
+encrypted, which is worth knowing before writing any rule that reads it.
+
+Versions across the deliverables:
+
+| deliverable | K8s version | `encryption_config` | envelope encryption |
+|---|---|---|---|
+| webhook-claude | 1.31 | yes | CMK |
+| webhook-sonnet-3 | 1.30 | yes | CMK |
+| webhook-haiku-4 | 1.28 | no | **default, AWS-owned key** |
+| webhook-haiku-6 | 1.28 | no | **default, AWS-owned key** |
+| webhook-haiku-9 | 1.28 | no | **default, AWS-owned key** |
+| webhook-haiku-12 | 1.27 | no | disk-level only |
+
+Checkov's `CKV_AWS_58` fires on four of these, and for three of the four the finding is moot at the
+version they run. A blocking rule built on it would have blocked correct configurations — the exact
+failure this file exists to prevent. The one cluster where the finding has any force is on 1.27,
+which is separately flagged by `CKV_AWS_339` for running an unsupported version, and fixing *that*
+resolves this as a side effect.
+
+The taxonomy category stays reserved. If it is ever implemented it must be framed as key custody and
+gated on the cluster version, never as "secrets are unencrypted".
+
+### 3. Customer-managed KMS key on Secrets Manager / DynamoDB — closed: partly covered, and unscopable
+
+Closed on the reasoning already written in this entry, which survives review: both services encrypt
+at rest by default with AWS-managed keys, so the finding is about who can revoke access rather than
+whether the data is readable. Flagging every table and secret without a CMK fires on ordinary
+configurations.
+
+One part of it has since been covered from the other direction. `local-delegate-mcp`'s retention
+durability check reports a KMS key that the configuration can schedule for deletion when the records
+depend on it — "ciphertext without its key is not a record". That is the custody concern where it has
+teeth, scoped to a store the task designates as needing seven-year retention, which is exactly the
+scoping this entry said would be required.
+
+No taxonomy category is reserved and none should be until a task exists whose stated requirement is
+separation of duties over key material.
 
 ---
 
 ## Note on Checkov IDs
 
-The review that raised these named `CKV_AWS_38` for the public endpoint. IDs for the other checks
-were not independently verified and are deliberately not recorded here — look them up against
-Checkov's own registry if they are needed, rather than trusting a remembered mapping.
+The review that raised these named `CKV_AWS_38` for the public endpoint. The IDs now recorded above
+— `CKV_AWS_37`, `CKV_AWS_58`, `CKV_AWS_339` — were observed in Checkov's own output against
+webhook-haiku-12 on 12 September 2026, not looked up from memory. Anything added later should be
+obtained the same way.
+
+## What closing these cost, and what it bought
+
+Two of the three were closed on provider documentation that contradicted the assumption behind the
+entry, and the third on evidence in this file that had gone stale and pointed the wrong way. Nothing
+was built.
+
+That is the intended outcome of the rule in the header — each entry needs its defaults verified
+against real provider docs, not recollection — and it is the second time that rule has prevented a
+rule from being written. The first was the S3 default-encryption check, killed by SSE-S3 becoming
+default in 2023. This time it was EKS envelope encryption becoming default at Kubernetes 1.28.
+
+Both would have blocked correct configurations. A gate that does that gets switched off, and then
+protects nothing.
