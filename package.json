@@ -13,5 +13,5 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^4.4.3"
   },
-  "license": "MIT"
+  "license": "Apache-2.0"
 }
