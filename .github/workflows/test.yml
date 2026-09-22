@@ -1,0 +1,40 @@
+# The test suite, on every push and pull request.
+#
+# This repository is published, tagged and installed by other people. "It passed on my machine" is
+# the guarantee agent-gate exists to replace, so it is not the guarantee this repository ships with
+# either.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci --ignore-scripts
+
+      # A skipped test is not a passing one. Suites here skip when a scanner they drive is absent,
+      # which is correct locally and worthless in CI: the job would report green having verified
+      # nothing about the half that matters. Asserting the count keeps that visible.
+      - name: test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+          skipped=$(grep -oE 'skipped [0-9]+' test-output.txt | awk '{s+=$2} END{print s+0}')
+          if [ "$skipped" != "0" ]; then
+            echo "::error title=tests skipped::$skipped test(s) were skipped. A suite that skips proves nothing about what it skipped."
+            exit 1
+          fi
+          echo "::notice title=tests::no tests were skipped"
