@@ -26,8 +26,8 @@ jobs:
 
       # One definition of what the controls need, kept where the controls are, rather than four
       # copies drifting apart in four repositories.
-      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.0.1
+      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.0.2
 
-      - uses: tjwitko/agent-gate@v1.0.1
+      - uses: tjwitko/agent-gate@v1.0.2
         with:
           project: .
