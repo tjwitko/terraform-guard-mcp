@@ -1,0 +1,33 @@
+# agent-gate, run against this repository.
+#
+# Circular on the face of it: this repository is one of the four control servers agent-gate runs.
+# It is not recursive — the gate arrives pinned at a released tag and scans whatever is on this
+# branch, so a defect introduced here cannot excuse itself. The pinned release is a fixed oracle.
+#
+# This repository's own fixtures are broken on purpose, because that is what proves its rules fire.
+# They carry a marker declaring exactly that, the gate honours it, and the exemption is printed in
+# the log with the reason on every run — visible, not silent.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    name: agent-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # One definition of what the controls need, kept where the controls are, rather than four
+      # copies drifting apart in four repositories.
+      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.0.1
+
+      - uses: tjwitko/agent-gate@v1.0.1
+        with:
+          project: .
