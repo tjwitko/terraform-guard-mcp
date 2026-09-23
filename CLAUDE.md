@@ -35,7 +35,7 @@ don't go through its own tool.
 - `lib/aws-credentials.mjs` — STS AssumeRole for credential scoping (see "Things to know")
 - `rules/engine.mjs` — `buildIndex()`/`evaluate()`, provider routing by `provider_name`'s final
   path segment (not `type` prefix — deliberate, see "Things to know")
-- `rules/aws.mjs` — the only provider pack implemented so far, 7 rules
+- `rules/aws.mjs` — the only provider pack implemented so far, 14 rules
 - `rules/taxonomy.mjs` — shared category-id list, includes categories reserved for GCP/Azure
   packs that don't exist yet
 - `fixtures/aws-insecure/`, `fixtures/aws-secure/` — real Terraform configs for end-to-end
