@@ -542,10 +542,24 @@ const rules = [
       if (configs.length === 0) return [];
 
       return buckets
-        // Same module_address matching as the public-access-block rule, and for the same reason:
-        // a new bucket's id is unresolved at plan time, so the configuration's
-        // `bucket = aws_s3_bucket.this.id` reference has no literal value to match on.
-        .filter((bucket) => configs.some((c) => c.module_address === bucket.module_address))
+        // Paired by the reference the lock configuration declares, the same way the
+        // public-access-block rule pairs its block. This rule used to pair by module address,
+        // which meant any lock configuration in a module made every bucket in it "targeted": an
+        // Opus run was refused with "an object lock configuration targets this bucket" naming a
+        // bucket that no lock configuration named, while the only one present named a sibling that
+        // did have the flag. The reference survives the bucket's id being unknown at plan time,
+        // which is what made the module shortcut look necessary.
+        //
+        // This closes a miss in the other direction too: a lock configuration naming a bucket in
+        // another module could not be seen at all, so a genuinely broken pairing — which fails at
+        // apply — went unreported.
+        .filter((bucket) => {
+          const named = index.referencing("aws_s3_bucket_object_lock_configuration", "bucket", bucket);
+          // Plans carrying no configuration keep the old pairing; see the same fallback in
+          // s3-public-access-block-missing.
+          const matched = named ?? configs.filter((c) => c.module_address === bucket.module_address);
+          return matched.length > 0;
+        })
         .filter((bucket) => (bucket.change.after || {}).object_lock_enabled !== true)
         .map((bucket) =>
           makeViolation(rules[10], bucket, {

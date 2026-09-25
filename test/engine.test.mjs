@@ -121,7 +121,7 @@ function configOf(...entries) {
   return { root_module: root };
 }
 
-const pabRef = (bucket) => [`${bucket}.id`, bucket];
+const refTo = (bucket) => [`${bucket}.id`, bucket];
 
 test("s3-public-access-block-missing: a bucket does not inherit a sibling bucket's PAB", () => {
   // The false negative itself. Before the fix this returned no violations at all.
@@ -142,7 +142,7 @@ test("s3-public-access-block-missing: a bucket does not inherit a sibling bucket
       {
         address: "aws_s3_bucket_public_access_block.protected",
         attribute: "bucket",
-        references: pabRef("aws_s3_bucket.protected"),
+        references: refTo("aws_s3_bucket.protected"),
       }
     ),
   };
@@ -173,7 +173,7 @@ test("s3-public-access-block-missing: a PAB naming its bucket in another module 
       {
         address: "aws_s3_bucket_public_access_block.remote",
         attribute: "bucket",
-        references: pabRef("module.storage.aws_s3_bucket.this"),
+        references: refTo("module.storage.aws_s3_bucket.this"),
       }
     ),
   };
@@ -197,7 +197,7 @@ test("s3-public-access-block-missing: a count-expanded bucket pairs with its dec
       {
         address: "aws_s3_bucket_public_access_block.this",
         attribute: "bucket",
-        references: pabRef("aws_s3_bucket.this"),
+        references: refTo("aws_s3_bucket.this"),
       }
     ),
   };
@@ -228,12 +228,12 @@ test("s3-public-access-block-missing: a second, weaker PAB on the same bucket is
       {
         address: "aws_s3_bucket_public_access_block.good",
         attribute: "bucket",
-        references: pabRef("aws_s3_bucket.this"),
+        references: refTo("aws_s3_bucket.this"),
       },
       {
         address: "aws_s3_bucket_public_access_block.weak",
         attribute: "bucket",
-        references: pabRef("aws_s3_bucket.this"),
+        references: refTo("aws_s3_bucket.this"),
       }
     ),
   };
@@ -754,6 +754,103 @@ function bucketAndLock({ objectLockEnabled, withConfig = true }) {
 
 const LOCK_RULE = "aws.storage.s3-object-lock-not-enabled-on-bucket";
 const has = (v, id) => v.some((x) => x.ruleId === id);
+
+// The refusal an Opus run was given, reduced to its shape: two buckets, one lock configuration,
+// naming the bucket that does have the flag. The run changed its configuration rather than the
+// control, as RUN.md requires, and recorded the defect — the message asserted a lock configuration
+// targeted `aws_s3_bucket.audit` when none did.
+test("object-lock: a bucket is not flagged for a lock configuration that names a sibling", () => {
+  const plan = {
+    ...planOf(
+      resource({
+        address: "aws_s3_bucket.archive",
+        type: "aws_s3_bucket",
+        name: "archive",
+        after: { object_lock_enabled: true },
+      }),
+      resource({ address: "aws_s3_bucket.audit", type: "aws_s3_bucket", name: "audit", after: {} }),
+      resource({
+        address: "aws_s3_bucket_object_lock_configuration.archive",
+        type: "aws_s3_bucket_object_lock_configuration",
+        name: "archive",
+        after: {},
+      })
+    ),
+    configuration: configOf(
+      { address: "aws_s3_bucket.archive" },
+      { address: "aws_s3_bucket.audit" },
+      {
+        address: "aws_s3_bucket_object_lock_configuration.archive",
+        attribute: "bucket",
+        references: refTo("aws_s3_bucket.archive"),
+      }
+    ),
+  };
+  const v = evaluate(plan, PROVIDER_PACKS);
+  assert.ok(!has(v, LOCK_RULE), `unexpected ${LOCK_RULE} on a bucket no lock configuration names`);
+});
+
+test("object-lock: the bucket a lock configuration does name is still flagged", () => {
+  // The rule must keep working once pairing is exact — the failure it catches is a real one that
+  // breaks at apply.
+  const plan = {
+    ...planOf(
+      resource({ address: "aws_s3_bucket.archive", type: "aws_s3_bucket", name: "archive", after: {} }),
+      resource({ address: "aws_s3_bucket.other", type: "aws_s3_bucket", name: "other", after: { object_lock_enabled: true } }),
+      resource({
+        address: "aws_s3_bucket_object_lock_configuration.archive",
+        type: "aws_s3_bucket_object_lock_configuration",
+        name: "archive",
+        after: {},
+      })
+    ),
+    configuration: configOf(
+      { address: "aws_s3_bucket.archive" },
+      { address: "aws_s3_bucket.other" },
+      {
+        address: "aws_s3_bucket_object_lock_configuration.archive",
+        attribute: "bucket",
+        references: refTo("aws_s3_bucket.archive"),
+      }
+    ),
+  };
+  const flagged = evaluate(plan, PROVIDER_PACKS)
+    .filter((v) => v.ruleId === LOCK_RULE)
+    .map((v) => v.resourceAddress);
+  assert.deepEqual(flagged, ["aws_s3_bucket.archive"]);
+});
+
+test("object-lock: a lock configuration naming a bucket in another module is seen", () => {
+  // Module pairing could not see this at all, so a pairing that fails at apply went unreported.
+  const plan = {
+    ...planOf(
+      resource({
+        address: "module.storage.aws_s3_bucket.this",
+        type: "aws_s3_bucket",
+        module_address: "module.storage",
+        after: {},
+      }),
+      resource({
+        address: "aws_s3_bucket_object_lock_configuration.remote",
+        type: "aws_s3_bucket_object_lock_configuration",
+        name: "remote",
+        after: {},
+      })
+    ),
+    configuration: configOf(
+      { address: "aws_s3_bucket.this", module_address: "module.storage" },
+      {
+        address: "aws_s3_bucket_object_lock_configuration.remote",
+        attribute: "bucket",
+        references: refTo("module.storage.aws_s3_bucket.this"),
+      }
+    ),
+  };
+  const flagged = evaluate(plan, PROVIDER_PACKS)
+    .filter((v) => v.ruleId === LOCK_RULE)
+    .map((v) => v.resourceAddress);
+  assert.deepEqual(flagged, ["module.storage.aws_s3_bucket.this"]);
+});
 
 test("object-lock: flags a lock configuration on a bucket missing object_lock_enabled", () => {
   const v = evaluate(bucketAndLock({ objectLockEnabled: undefined }), PROVIDER_PACKS);

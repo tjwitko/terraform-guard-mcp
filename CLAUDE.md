@@ -276,5 +276,7 @@ before any real API call happens.
   rather than `[]` when a plan has no configuration, so a caller cannot read "could not ask" as
   "found none"; and **all** matching companions are checked rather than the first, which is the
   original defect one level down. Found by an Opus run that hit the same shortcut's other half — the
-  object-lock rule flagging a bucket no lock configuration named. **That rule still pairs by module
-  and still has the false positive**; the resolver it needs is now in place.
+  object-lock rule flagging a bucket no lock configuration named, which now resolves the same way.
+  Both directions of that rule were wrong too: it flagged a bucket a sibling's lock configuration
+  made look targeted, and it could not see a lock configuration naming a bucket in another module,
+  which is a pairing that fails at apply.
