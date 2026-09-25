@@ -255,7 +255,9 @@ before any real API call happens.
   never appears in `after` at all when unset (confirmed on a real `terraform show -json`, after a
   first draft that only handled the null-in-`after` branch that real plans never take).
 - **Advisory-only findings that arguably belong in the blocking pack are tracked in
-  `docs/candidate-rules.md`.** Three are open there. Nothing is promoted without verifying the
+  `docs/candidate-rules.md`.** None are open there: the three that were are recorded under
+  "Closed without promotion", each closed on verified provider behaviour so none gets re-opened
+  from recollection. Nothing is promoted without verifying the
   attribute's real default first — the same discipline that dropped the originally-planned 8th S3
   rule — because a false positive in a blocking gate destroys work rather than merely missing a
   finding.
