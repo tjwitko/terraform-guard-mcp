@@ -83,6 +83,180 @@ test("s3-public-access-block-missing: a bucket whose PAB is being deleted is sti
   assert.deepEqual(ruleIds(violations), ["aws.storage.s3-public-access-block-missing"]);
 });
 
+// --- pairing a companion resource to the bucket it actually names -----------------------------
+//
+// These cover the defect that made this rule pass an unprotected bucket. It used to pair a bucket
+// with any public access block in the same module, so `pabs.find(...)` handed a bucket with no
+// block of its own the FIRST one declared nearby, and every attribute came back true. Reproduced
+// against a real `terraform show -json` plan before the fix: two buckets, one PAB naming only the
+// first, zero violations.
+//
+// The plan's `configuration` block is what makes the pairing exact — it records the reference as
+// written, so it survives the bucket's `id` being unknown at plan time, which is the reason the
+// module shortcut existed. The shape below matches a real plan: terraform emits both the attribute
+// reference and the bare resource address.
+const PAB_OK = {
+  block_public_acls: true,
+  block_public_policy: true,
+  ignore_public_acls: true,
+  restrict_public_buckets: true,
+};
+
+function configOf(...entries) {
+  const byModule = new Map();
+  for (const e of entries) {
+    const key = e.module_address ?? "";
+    if (!byModule.has(key)) byModule.set(key, []);
+    byModule.get(key).push({
+      address: e.address,
+      type: e.address.split(".")[0],
+      expressions: e.references ? { [e.attribute]: { references: e.references } } : {},
+    });
+  }
+  const root = { resources: byModule.get("") || [], module_calls: {} };
+  for (const [key, resources] of byModule) {
+    if (key === "") continue;
+    root.module_calls[key.replace(/^module\./, "")] = { module: { resources, module_calls: {} } };
+  }
+  return { root_module: root };
+}
+
+const pabRef = (bucket) => [`${bucket}.id`, bucket];
+
+test("s3-public-access-block-missing: a bucket does not inherit a sibling bucket's PAB", () => {
+  // The false negative itself. Before the fix this returned no violations at all.
+  const plan = {
+    ...planOf(
+      resource({ address: "aws_s3_bucket.protected", type: "aws_s3_bucket", name: "protected" }),
+      resource({ address: "aws_s3_bucket.exposed", type: "aws_s3_bucket", name: "exposed" }),
+      resource({
+        address: "aws_s3_bucket_public_access_block.protected",
+        type: "aws_s3_bucket_public_access_block",
+        name: "protected",
+        after: PAB_OK,
+      })
+    ),
+    configuration: configOf(
+      { address: "aws_s3_bucket.protected" },
+      { address: "aws_s3_bucket.exposed" },
+      {
+        address: "aws_s3_bucket_public_access_block.protected",
+        attribute: "bucket",
+        references: pabRef("aws_s3_bucket.protected"),
+      }
+    ),
+  };
+  const flagged = evaluate(plan, PROVIDER_PACKS)
+    .filter((v) => v.ruleId === "aws.storage.s3-public-access-block-missing")
+    .map((v) => v.resourceAddress);
+  assert.deepEqual(flagged, ["aws_s3_bucket.exposed"], "only the bucket with no block of its own");
+});
+
+test("s3-public-access-block-missing: a PAB naming its bucket in another module still counts", () => {
+  // The miss the old comment admitted to. Same-module pairing could not see this; a reference can.
+  const plan = {
+    ...planOf(
+      resource({
+        address: "module.storage.aws_s3_bucket.this",
+        type: "aws_s3_bucket",
+        module_address: "module.storage",
+      }),
+      resource({
+        address: "aws_s3_bucket_public_access_block.remote",
+        type: "aws_s3_bucket_public_access_block",
+        name: "remote",
+        after: PAB_OK,
+      })
+    ),
+    configuration: configOf(
+      { address: "aws_s3_bucket.this", module_address: "module.storage" },
+      {
+        address: "aws_s3_bucket_public_access_block.remote",
+        attribute: "bucket",
+        references: pabRef("module.storage.aws_s3_bucket.this"),
+      }
+    ),
+  };
+  assert.deepEqual(ruleIds(evaluate(plan, PROVIDER_PACKS)), []);
+});
+
+test("s3-public-access-block-missing: a count-expanded bucket pairs with its declaration", () => {
+  // resource_changes carries `[0]`; configuration never does. Without stripping the key, every
+  // expanded bucket would look unprotected — the false positive direction, on a blocking rule.
+  const plan = {
+    ...planOf(
+      resource({ address: "aws_s3_bucket.this[0]", type: "aws_s3_bucket" }),
+      resource({
+        address: "aws_s3_bucket_public_access_block.this[0]",
+        type: "aws_s3_bucket_public_access_block",
+        after: PAB_OK,
+      })
+    ),
+    configuration: configOf(
+      { address: "aws_s3_bucket.this" },
+      {
+        address: "aws_s3_bucket_public_access_block.this",
+        attribute: "bucket",
+        references: pabRef("aws_s3_bucket.this"),
+      }
+    ),
+  };
+  assert.deepEqual(ruleIds(evaluate(plan, PROVIDER_PACKS)), []);
+});
+
+test("s3-public-access-block-missing: a second, weaker PAB on the same bucket is not ignored", () => {
+  // Every block naming the bucket has to be complete. Reading only the first would restore the
+  // original defect one level down.
+  const plan = {
+    ...planOf(
+      resource({ address: "aws_s3_bucket.this", type: "aws_s3_bucket" }),
+      resource({
+        address: "aws_s3_bucket_public_access_block.good",
+        type: "aws_s3_bucket_public_access_block",
+        name: "good",
+        after: PAB_OK,
+      }),
+      resource({
+        address: "aws_s3_bucket_public_access_block.weak",
+        type: "aws_s3_bucket_public_access_block",
+        name: "weak",
+        after: { ...PAB_OK, restrict_public_buckets: false },
+      })
+    ),
+    configuration: configOf(
+      { address: "aws_s3_bucket.this" },
+      {
+        address: "aws_s3_bucket_public_access_block.good",
+        attribute: "bucket",
+        references: pabRef("aws_s3_bucket.this"),
+      },
+      {
+        address: "aws_s3_bucket_public_access_block.weak",
+        attribute: "bucket",
+        references: pabRef("aws_s3_bucket.this"),
+      }
+    ),
+  };
+  assert.deepEqual(ruleIds(evaluate(plan, PROVIDER_PACKS)), ["aws.storage.s3-public-access-block-missing"]);
+});
+
+test("s3-public-access-block-missing: a plan with no configuration falls back to same-module pairing", () => {
+  // Every plan `terraform show -json` produces carries configuration. A plan assembled from
+  // resource_changes alone cannot answer the question, and the old pairing is kept for it rather
+  // than failing closed on a blocking rule. Pinned so the fallback is a decision, not an accident.
+  const plan = planOf(
+    resource({ address: "aws_s3_bucket.this", type: "aws_s3_bucket", module_address: "module.storage" }),
+    resource({
+      address: "aws_s3_bucket_public_access_block.this",
+      type: "aws_s3_bucket_public_access_block",
+      module_address: "module.storage",
+      after: PAB_OK,
+    })
+  );
+  assert.equal(plan.configuration, undefined);
+  assert.deepEqual(ruleIds(evaluate(plan, PROVIDER_PACKS)), []);
+});
+
 test("sg-open-ingress: flags inline ingress open to 0.0.0.0/0 on port 22", () => {
   const plan = planOf(
     resource({

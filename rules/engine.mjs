@@ -1,4 +1,5 @@
 import { sortBySeverity } from "../lib/format.mjs";
+import { buildReferenceIndex, referenceMatches, stripIndex } from "../lib/plan-references.mjs";
 
 // A resource whose ONLY action is "delete" won't exist after apply, so it can't be protecting
 // anything — excluding it from the index is what makes "the companion resource that protects
@@ -20,11 +21,29 @@ export function providerKey(providerName) {
   return last === "google-beta" ? "google" : last;
 }
 
-export function buildIndex(resourceChanges) {
+export function buildIndex(resourceChanges, configuration = null) {
   const all = resourceChanges.filter((r) => existsAfterApply(r.change));
+  const references = buildReferenceIndex(configuration);
 
   return {
     all,
+    // Whether this plan can say which resource a companion resource names. False for a synthetic
+    // plan built from resource_changes alone; true for anything `terraform show -json` produced.
+    // A rule that pairs resources must branch on this rather than assume, because the fallback
+    // pairing is strictly weaker and the difference is not visible in its output.
+    canResolveReferences: references !== null,
+
+    // Resources of `type` whose `attribute` was written as a reference to `target`. Returns null
+    // -- not an empty array -- when this plan carries no configuration, so a caller cannot read
+    // "could not ask" as "found none".
+    referencing(type, attribute, target) {
+      if (references === null) return null;
+      return all.filter((r) => {
+        if (r.type !== type) return false;
+        const refs = references.get(stripIndex(r.address))?.get(attribute);
+        return refs ? referenceMatches(refs, target.address) : false;
+      });
+    },
     byType(type) {
       return all.filter((r) => r.type === type);
     },
@@ -59,7 +78,7 @@ export function makeViolation(rule, resource, { message, remediation, attribute 
 }
 
 export function evaluate(planJson, providerPacks) {
-  const index = buildIndex(planJson.resource_changes || []);
+  const index = buildIndex(planJson.resource_changes || [], planJson.configuration || null);
   const violations = [];
 
   for (const [key, pack] of Object.entries(providerPacks)) {

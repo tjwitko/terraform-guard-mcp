@@ -259,3 +259,22 @@ before any real API call happens.
   attribute's real default first — the same discipline that dropped the originally-planned 8th S3
   rule — because a false positive in a blocking gate destroys work rather than merely missing a
   finding.
+- **Companion resources are paired by the reference they declare, read from `plan.configuration` —
+  not by module.** Both S3 companion rules used to pair a bucket with anything of the right type in
+  the same module, because a new bucket's `id` is unknown at plan time and there is no literal value
+  in `resource_changes` to match on. The comment defending it argued the shortcut could only miss a
+  cross-module companion and "will never wrongly flag a correctly-configured same-module setup,
+  which is the safer failure direction for a blocking tool." That reasoned about wrongly flagging
+  and not about wrongly passing. `pabs.find(...)` returned the **first** public access block in the
+  module, so a bucket with no block of its own was evaluated against a sibling's and came back
+  clean — a critical blocking rule reporting an unprotected bucket as protected, confirmed against a
+  real `terraform plan`. `lib/plan-references.mjs` reads `configuration.root_module`, which records
+  each attribute as written (`bucket = aws_s3_bucket.this.id`) and so survives the value being
+  unknown; that block was previously never read anywhere in this project. Three things to keep:
+  addresses are compared with count/for_each keys stripped, because `configuration` is
+  per-declaration and `resource_changes` is per-instance; `index.referencing()` returns **null**
+  rather than `[]` when a plan has no configuration, so a caller cannot read "could not ask" as
+  "found none"; and **all** matching companions are checked rather than the first, which is the
+  original defect one level down. Found by an Opus run that hit the same shortcut's other half — the
+  object-lock rule flagging a bucket no lock configuration named. **That rule still pairs by module
+  and still has the false positive**; the resolver it needs is now in place.

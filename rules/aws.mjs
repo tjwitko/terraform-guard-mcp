@@ -171,18 +171,34 @@ const rules = [
 
       return buckets
         .filter((bucket) => {
-          // Matched by module_address, not by resolved bucket id/reference: a newly-created
-          // bucket's `id` is unresolved at plan time (after_unknown.id === true), so the PAB's
-          // `bucket = aws_s3_bucket.this.id` reference is unresolved too — there's no literal
-          // value to match on for the common "brand new bucket" case. Same-module is a
-          // deliberate, documented simplification: it can miss a PAB declared in a different
-          // module than its bucket (a rare pattern), but it will never wrongly flag a
-          // correctly-configured same-module setup, which is the safer failure direction for a
-          // blocking tool.
-          const pab = pabs.find((p) => p.module_address === bucket.module_address);
-          if (!pab) return true;
-          const after = pab.change.after || {};
-          return required.some((attr) => after[attr] !== true);
+          // Paired by the reference the PAB actually declares, read from the plan's
+          // `configuration` block, which records `bucket = aws_s3_bucket.this.id` as written and
+          // so survives the bucket's `id` being unknown at plan time.
+          //
+          // This rule used to pair anything in the same module, because that unknown `id` left no
+          // literal value to match on. The comment defending it argued the simplification could
+          // only miss a cross-module PAB and "will never wrongly flag a correctly-configured
+          // same-module setup, which is the safer failure direction for a blocking tool". That
+          // reasoned about wrongly flagging and never about wrongly passing, which is what it
+          // actually did: `pabs.find(...)` returned the FIRST block in the module, so a bucket
+          // with no block of its own was evaluated against a sibling's and came back clean.
+          // Verified against a real plan — two buckets, one PAB naming only the first, zero
+          // violations. A critical blocking rule reported an unprotected bucket as protected.
+          const named = index.referencing("aws_s3_bucket_public_access_block", "bucket", bucket);
+
+          // A plan with no configuration block cannot answer which bucket a PAB names — synthetic
+          // plans built from resource_changes alone, and nothing `terraform show -json` emits.
+          // The old same-module pairing stays as the fallback for those, unchanged, because it is
+          // still better than nothing; it is not used for any real plan.
+          const matched = named ?? pabs.filter((p) => p.module_address === bucket.module_address);
+
+          if (matched.length === 0) return true;
+          // Every block naming this bucket must be complete. Taking the first would restore the
+          // original defect one level down, where a second, weaker block could be ignored.
+          return matched.some((pab) => {
+            const after = pab.change.after || {};
+            return required.some((attr) => after[attr] !== true);
+          });
         })
         .map((bucket) =>
           makeViolation(rules[0], bucket, {
