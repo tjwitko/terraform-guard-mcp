@@ -24,6 +24,14 @@ jobs:
         with:
           node-version: "22"
 
+      # The gate's `tests` validator runs `node --test` against THIS repository, and the action's
+      # own `npm ci --prefix $GITHUB_ACTION_PATH` installs the action's dependencies, not ours.
+      # Without this step the suite cannot load its imports and every test file fails, which is
+      # what happened the moment a task file switched the tests check on: three of the four gates
+      # went red on a workflow that had been green for days, because the check that would have
+      # caught it was gated off.
+      - run: npm ci --ignore-scripts
+
       # One definition of what the controls need, kept where the controls are, rather than four
       # copies drifting apart in four repositories.
       - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.0
