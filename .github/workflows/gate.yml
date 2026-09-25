@@ -26,8 +26,13 @@ jobs:
 
       # One definition of what the controls need, kept where the controls are, rather than four
       # copies drifting apart in four repositories.
-      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.0.2
+      - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.1.0
 
       - uses: tjwitko/agent-gate@v1.1.0
         with:
           project: .
+          # Six checks are gated on what the task asked for; without this they report "not checked",
+          # which is accurate and useless. The file states only what is true of this repository --
+          # a requirement invented to switch a check on is a fabricated requirement, and this gate
+          # exists to catch exactly that.
+          task-file: .github/gate-task.txt

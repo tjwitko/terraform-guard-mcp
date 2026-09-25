@@ -1,0 +1,24 @@
+# The contract this repository is held to, read by agent-gate in .github/workflows/gate.yml.
+#
+# Six checks are gated on what the task asked for. This file exists so the ones that apply here
+# actually run, and it states only what is true of this project: a requirement written to switch a
+# check on would be a fabricated requirement, which is worse than a missing check.
+
+An MCP server that refuses Terraform whose plan violates a security rule.
+
+WHAT IT MUST DO
+- Expose `terraform_validate`, `terraform_plan` and `terraform_apply` over MCP stdio.
+- Judge a plan from `terraform show -json`, never from matching lines of HCL.
+- Stay inside the working root it was given, and refuse a directory outside it.
+
+HOW WE WILL JUDGE IT
+- Automated tests that someone else can run, covering the tools themselves and not only the rule
+  functions behind them. A tool has shipped broken here while its rules were fully covered.
+- Errors distinguished from faults: a plan that is scanned and found insecure is a result, not a
+  failure of the scanner. A plan that could not be produced at all is a different answer again, and
+  the two must never collapse into one exit code.
+- A check that cannot run must say so, and never pass.
+
+NOT IN SCOPE
+- No deployment artifacts. This is an MCP server distributed as a package, not a deployed service.
+- No records are stored here, and no credentials are held.
