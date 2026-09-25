@@ -92,7 +92,7 @@ server.tool(
   async ({ working_dir }) => {
     let resolvedDir;
     try {
-      resolvedDir = resolveWorkingDir(working_dir);
+      resolvedDir = resolveWorkingDir(working_dir, WORKING_ROOT);
     } catch (err) {
       return { content: [{ type: "text", text: `Refusing to validate: ${err.message}` }], isError: true };
     }
