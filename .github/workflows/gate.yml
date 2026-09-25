@@ -28,6 +28,6 @@ jobs:
       # copies drifting apart in four repositories.
       - uses: tjwitko/agent-gate/.github/actions/control-tooling@v1.0.2
 
-      - uses: tjwitko/agent-gate@v1.0.2
+      - uses: tjwitko/agent-gate@v1.1.0
         with:
           project: .
