@@ -1,6 +1,6 @@
 {
   "name": "@tjwitko/terraform-guard-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "MCP server that blocks an LLM agent from applying insecure Terraform infrastructure. Scans terraform show -json plan output against a rule engine before allowing apply.",

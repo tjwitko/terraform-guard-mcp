@@ -42,7 +42,7 @@ It exists because a generated Terraform config shipped an S3 bucket policy grant
 ### Install
 
 ```bash
-npm install --save-dev github:tjwitko/terraform-guard-mcp#v1.0.0
+npm install --save-dev github:tjwitko/terraform-guard-mcp#v1.1.0
 ```
 
 ### Register it with an MCP client
