@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import path from "path";
 import os from "os";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { randomUUID } from "crypto";
 
 import { resolveWorkingDir } from "./lib/paths.mjs";
@@ -62,9 +62,13 @@ sanitizeEnv();
 // local-delegate-mcp's CONTEXT_ROOT.
 const WORKING_ROOT = path.resolve(process.env.TF_WORKING_ROOT || process.cwd());
 
+// Read, not written in. This said "0.1.0" while package.json moved on, so an MCP client asking the
+// server what it was got an answer that was releases out of date.
+const { version: VERSION } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+
 const server = new McpServer({
   name: "terraform-guard",
-  version: "0.1.0",
+  version: VERSION,
 });
 
 // Cheap syntax and schema checking, with no plan, no credentials and no backend. Added because the
