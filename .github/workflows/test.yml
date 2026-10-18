@@ -1,7 +1,7 @@
 # The test suite, on every push and pull request.
 #
 # This repository is published, tagged and installed by other people. "It passed on my machine" is
-# the guarantee agent-gate exists to replace, so it is not the guarantee this repository ships with
+# the guarantee wolfproof exists to replace, so it is not the guarantee this repository ships with
 # either.
 name: test
 

@@ -284,10 +284,10 @@ Nothing is promoted without verifying the attribute's real default first.
 
 ---
 
-## Part of agent-gate
+## Part of wolfproof
 
 This is one of four control servers behind
-[agent-gate](https://github.com/tjwitko/agent-gate), which runs them together and fails a build on
+[wolfproof](https://github.com/tjwitko/wolfproof), which runs them together and fails a build on
 what they find. It works standalone with any MCP client.
 
 ## License

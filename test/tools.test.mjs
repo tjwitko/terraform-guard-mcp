@@ -20,7 +20,7 @@ const FIXTURES = path.resolve(__dirname, "..", "fixtures");
  * misconfigured. Two of three call sites passed the root; one did not.
  *
  * 130 tests did not catch it. They cover this tool's classification logic and never its handler,
- * and agent-gate's corpus calls `terraform_plan` rather than `terraform_validate`, so the gate
+ * and wolfproof's corpus calls `terraform_plan` rather than `terraform_validate`, so the gate
  * could not see it either. It surfaced when a model was told to use the tool and reported honestly
  * that it errored on every call.
  *
