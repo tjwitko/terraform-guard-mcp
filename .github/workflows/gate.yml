@@ -50,9 +50,9 @@ jobs:
 
       # One definition of what the controls need, kept where the controls are, rather than four
       # copies drifting apart in four repositories.
-      - uses: tjwitko/wolfproof/.github/actions/control-tooling@v1.7.0
+      - uses: tjwitko/wolfproof/.github/actions/control-tooling@v1.8.0
 
-      - uses: tjwitko/wolfproof@v1.7.0
+      - uses: tjwitko/wolfproof@v1.8.0
         with:
           project: .
           # Six checks are gated on what the task asked for; without this they report "not checked",
