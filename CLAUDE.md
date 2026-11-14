@@ -282,3 +282,14 @@ before any real API call happens.
   Both directions of that rule were wrong too: it flagged a bucket a sibling's lock configuration
   made look targeted, and it could not see a lock configuration naming a bucket in another module,
   which is a pairing that fails at apply.
+
+## How changes land
+
+Changes to this repository go through a pull request, not a push to `main`.
+
+- Work on a branch, push it, and open a pull request.
+- Wait for the four required checks (`agent-gate` and the three `tests` jobs) before merging.
+- Do not merge your own pull request unless the user says to; they merge.
+
+One exception: the wolfproof release moves this repository's wolfproof pin with its own script,
+which commits `.github/workflows/gate.yml` and pushes straight to `main`. Leave that as it is.
