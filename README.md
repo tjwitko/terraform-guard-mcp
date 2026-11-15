@@ -213,7 +213,7 @@ agent's shell can read too.
 
 | variable | default | purpose |
 |---|---|---|
-| `TF_WORKING_ROOT` | the process's working directory at startup | `working_dir` must resolve inside it |
+| `TF_WORKING_ROOT` | the process's working directory at startup | `working_dir` and `var_file` must exist and their real paths, after symlinks, must be inside it |
 | `TF_PLAN_TTL_SECONDS` | `900` | how long a `planId` stays valid |
 | `TFGUARD_APPLY_ROLE_ARN` | — | enables credential scoping |
 | `TFGUARD_EXTERNAL_ID` | — | matched against the role's trust policy |

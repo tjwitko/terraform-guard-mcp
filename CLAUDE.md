@@ -73,6 +73,14 @@ before any real API call happens.
 
 ## Things to know
 
+- **Containment bounds the paths a caller names, not what terraform reads.** `resolveWorkingDir`
+  compares real paths, so `working_dir` and `var_file` cannot leave `TF_WORKING_ROOT` by `../`,
+  by an absolute path or through a symlink. Inside the working directory terraform is
+  terraform: it reads a symlinked `.tf` file wherever it points (verified, 1.15.8, and its parse
+  errors quote the target's lines), a local module `source` may be any path, and `file()` reads
+  whatever it is given. Refusing symlinks here would not change that, so it does not pretend
+  to. `scanTerraformSources` likewise reads a symlinked `.tf` file and does not enter a
+  symlinked directory.
 - **`provider_name`'s final path segment routes to a rule pack, not `type` prefix matching.**
   `"registry.terraform.io/hashicorp/aws"` → `aws`. Deliberate: a community/wrapped provider using
   a non-`aws_`-prefixed type naming convention would silently miss every rule under prefix

@@ -214,6 +214,19 @@ server.tool(
       return { content: [{ type: "text", text: `Refusing to plan: ${error.message}` }], isError: true };
     }
 
+    // var_file is the other caller-supplied path, and it was joined onto resolvedDir unchecked.
+    // terraform quotes the lines of a var file it cannot parse in its error, and the error is
+    // returned below, so "../../.aws/credentials" came back as that file's contents. Relative to
+    // working_dir, as documented, and held to the same root: a shared ../env/prod.tfvars still works.
+    let varFileArg;
+    if (var_file) {
+      try {
+        varFileArg = resolveWorkingDir(path.join(resolvedDir, var_file), WORKING_ROOT);
+      } catch (error) {
+        return { content: [{ type: "text", text: `Refusing to plan: var_file ${error.message}` }], isError: true };
+      }
+    }
+
     if (!checkTerraformInstalled()) {
       return {
         content: [
@@ -303,7 +316,6 @@ server.tool(
     }
 
     const tmpPlanPath = path.join(os.tmpdir(), `tfguard-${randomUUID()}.tfplan`);
-    const varFileArg = var_file ? path.join(resolvedDir, var_file) : undefined;
     // Supply whatever this configuration needs in order to plan at all, and remember that we did.
     // Sixteen agent runs produced sixteen unscanned deliverables: four blocked on a required
     // variable with no value, two on the machine having no cloud account. Neither is a property of
