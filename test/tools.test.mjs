@@ -84,11 +84,16 @@ test("resolveWorkingDir refuses to run without a containment root", () => {
   assert.throws(() => resolveWorkingDir("terraform", ""), /requires a containment root/);
 });
 
-test("resolveWorkingDir resolves inside its root and rejects escapes", () => {
-  const root = "/srv/project";
-  assert.equal(resolveWorkingDir("terraform", root), "/srv/project/terraform");
-  assert.equal(resolveWorkingDir(root, root), root);
-  assert.throws(() => resolveWorkingDir("../elsewhere", root), /refuses to operate outside/);
-  // The `+ path.sep` guard: a sibling sharing the root's prefix is outside it.
-  assert.throws(() => resolveWorkingDir("/srv/projectevil", root), /refuses to operate outside/);
+// Where it resolves to, and what it refuses, is tested over a real tree of files and symlinks in
+// test/paths.test.mjs.
+
+// var_file is a second caller-supplied path, and it was joined onto the working directory with no
+// containment at all. terraform reads a -var-file as HCL and quotes the lines it cannot parse in
+// its error, and terraform_plan returns that error -- so "../../.aws/credentials" came back as the
+// file's contents. It is held to the same root as working_dir, before terraform is run.
+test("terraform_plan refuses a var_file outside the working root", async () => {
+  const msg = await callTool("terraform_plan", { working_dir: "aws-secure", var_file: "../../package.json" });
+  const text = textOf(msg);
+  assert.match(text, /Refusing to plan: var_file .*refuses to operate outside/);
+  assert.doesNotMatch(text, /"name": "terraform-guard-mcp"/);
 });
